@@ -1,0 +1,94 @@
+
+atmosphere-grid:
+  bottom: 0.0 # cm
+  top: atmospherefile # cm
+  number-of-layers: 100
+
+planet:
+  planet-mass: 6.417e26 # grams
+  planet-radius: 3.396e8 # cm. Radius to bottom of atmosphere-grid
+  surface-albedo: 0.25 # cm
+  # photon-scale-factor: 1.0 # Optional. Scales the stellar flux for diff planets in the same system
+  solar-zenith-angle: 48.0 # degrees
+  hydrogen-escape:
+    type: diffusion limited
+  water:
+    fix-water-in-troposphere: false 
+    gas-rainout: false
+    water-condensation: false
+    
+particles:
+- {name: H2Oaer, RH-condensation: 1}
+- {name: SO2aer, RH-condensation: 1}
+- {name: H2Saer, RH-condensation: 1}
+- {name: S8aer, RH-condensation: 1}
+- {name: H2SO4aer, RH-condensation: 1}
+- {name: CO2aer, RH-condensation: 1}  
+# Specifies boundary conditions. If a species is not specified, then
+# the model assumes zero-flux boundary conditions at the top and
+# bottom of the atmosphere
+boundary-conditions:
+- name: H2O
+  lower-boundary: {type: press, press: 1.0e6}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: O2
+  lower-boundary: {type: press, press: 0.01e-1}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: SO2
+  lower-boundary: {type: press, press: 0.2e6}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: H2S
+  lower-boundary: {type: press, press: 0.2e-6}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: H2
+  lower-boundary: {type: press, press: 0.5e1}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: CO2
+  lower-boundary: {type: press, press: 0.5e6}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: CO
+  lower-boundary: {type: press, press: 0.11}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: HCl
+  lower-boundary: {type: press, press: 25e-3}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: O1D
+  type: short lived
+
+# standard stuff
+- name: O
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: H
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: OH
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: HO2
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: H2O2
+  lower-boundary: {type: vdep, vdep: 0.2}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: HCO
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: H2CO
+  lower-boundary: {type: vdep, vdep: 2e-1}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: CH3
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: O3
+  lower-boundary: {type: vdep, vdep: 0.07}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: OCS
+  lower-boundary: {type: vdep + dist flux, vdep: 0.003, flux: 5.0e-5, height: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: HSO
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
+- name: H2SO4
+  lower-boundary: {type: vdep, vdep: 1.0}
+  upper-boundary: {type: veff, veff: 0.0}
