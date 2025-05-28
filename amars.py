@@ -2,13 +2,19 @@ import torch
 import pyharp
 import time
 import numpy as np
-from torch import zeros
+from torch import zeros, tensor
 import shutil
+from pyharp import (constants,calc_dz_hypsometric)
 
-from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt
+from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions
 from photochem_utils import update_photochem_all, calc_dxdt, run_photochem_onestep, config_x_atm_from_photochem, run_photochem_onestep_andplot, load_atmosphere_file, plot_atmosphere_file
 
 from photochem import EvoAtmosphere
+
+k2ndOrder = 2
+k4thOrder = 4
+kExtrapolate = 0
+kConstant = 1
 
 class RadiationModelOptions:
     def __init__(self, ncol, nlyr, grav, mean_mol_weight, cp, aerosol_scale_factor, cSurf, kappa, 
@@ -152,6 +158,55 @@ def init_from_file(photo_filename, options):
 
     return temp, pres, xfrac, atm, x_atm_all
 
+def do_convective_adjustment(atm, options):
+    tolerance = 1.01
+    dry_lapse_rate = torch.tensor(options.grav / options.cp, dtype=atm["temp"].dtype)
+    dz_btwn_levels = calc_dz_hypsometric(atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+    l2l = Layer2LevelOptions(order=k2ndOrder)
+    plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure levels for the first column
+    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
+    new_temps = atm["temp"].clone()
+    dTdz_btwn_layers = torch.zeros_like(new_temps[:, :-1])
+    for k in range(options.nlyr - 1):
+        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+
+    do_again = True
+    ntries = 0
+    max_ntries = 200
+    while do_again and ntries < max_ntries:  
+        for k in range(options.nlyr - 1):
+            dp_k = plevels[0, k] - plevels[0, k + 1]
+            dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
+            if dTdz_btwn_layers[0, k] > dry_lapse_rate:
+                new_temps[0, k + 1] = ( dp_k * (new_temps[0, k] - dry_lapse_rate * dz_btwn_layers[0, k+1]) + dp_kplus1 * new_temps[0, k + 1] ) / (dp_k + dp_kplus1)
+                new_temps[0, k] = new_temps[0, k + 1] + dry_lapse_rate * dz_btwn_layers[0, k+1]
+
+        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
+        for k in range(options.nlyr - 1):
+            dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+
+        if (dTdz_btwn_layers > dry_lapse_rate * tolerance).any():
+            do_again = True
+        else:
+            do_again = False
+        ntries += 1
+        if ntries >= max_ntries:
+            print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
+            
+    atm["temp"] = new_temps
+    return atm
+
+def calc_dq(atm, new_temps, cond_species, species_svp):
+    """
+    Calculate the change in mixing ratios for each species.
+    This is a placeholder function; actual implementation will depend on the photochemistry model.
+    """
+    dq = {}
+    for key in atm:
+        if key.startswith('x'):
+            dq[key] = torch.zeros_like(atm[key])
+    return dq
 
 if __name__ == "__main__":
     nstr = 4
@@ -188,7 +243,7 @@ if __name__ == "__main__":
     dt_dyn = 86400.0/4
     dt_rad = dt_dyn
     dt_photo = dt_dyn*4
-    t_lim = dt_dyn*5000
+    t_lim = dt_dyn*2
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
     photo_init_filename = 'atmosphere_init.txt'
@@ -228,6 +283,7 @@ if __name__ == "__main__":
         #update the atmosphere at each dynamical time step
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn)
         x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict)
+        atm = do_convective_adjustment(atm, options)
         tot_time += dt_dyn
         step += 1
 

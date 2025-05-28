@@ -522,5 +522,5 @@ if __name__ == "__main__":
     #setup_presure_grid(nlyr=len(atmosphere_data["press"]), pbot=0.5, ptop=1e-7)
 
     file_to_plot = 'atmosphere_intermediate.txt'
-    plot_outname = 'atmosphere_conv.png'
+    plot_outname = 'atmosphere_int.png'
     plot_atmosphere_file('atmosphere_intermediate.txt', plot_outname)
