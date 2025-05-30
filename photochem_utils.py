@@ -4,6 +4,7 @@ from photochem.io import evo_read_evolve_output
 import torch
 from photochem import EvoAtmosphere
 from matplotlib import pyplot as plt
+import pandas as pd
 
 from amars_rt import layer2level, Layer2LevelOptions
 from pyharp import (
@@ -40,21 +41,26 @@ def plot_chem_each_timestep(pc):
     import matplotlib.pyplot as plt
 
     if not hasattr(plot_chem_each_timestep, "fig"):
-        plot_chem_each_timestep.fig, axs = plt.subplots(1, 2, figsize=[12, 4], dpi=100)
+        plot_chem_each_timestep.fig, axs = plt.subplots(1, 3, figsize=[12, 4], dpi=100)
         plot_chem_each_timestep.ax1 = axs[0]
         plot_chem_each_timestep.ax2 = axs[1]
+        plot_chem_each_timestep.ax3 = axs[2]
         plt.ion()
         plt.show(block=False)
 
     fig = plot_chem_each_timestep.fig
     ax1 = plot_chem_each_timestep.ax1
     ax2 = plot_chem_each_timestep.ax2
+    ax3 = plot_chem_each_timestep.ax3
 
     ax1.cla()
     ax2.cla()
+    ax3.cla()
 
     sol = pc.mole_fraction_dict()
     species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
+        # Calculate Brunt-Väisälä frequency
+    N2 = calc_brunt_vaisala_frequency(pc.var.temperature, pc.wrk.pressure/1e6)
 
     # Plot T-P profile
     if hasattr(pc.var, "temperature") and hasattr(pc.wrk, "pressure"):
@@ -85,6 +91,16 @@ def plot_chem_each_timestep(pc):
     ax2.legend(ncol=1, bbox_to_anchor=(1, 1.0), loc='upper left')
     ax2.set_title('Chemistry')
     ax2.text(0.02, 1.04, f't = {pc.wrk.tn:.2e} s', size=15, ha='left', va='bottom', transform=ax2.transAxes)
+
+        # --- Brunt-Väisälä Frequency ---
+    ax3.plot(N2.squeeze()*1e4, pc.wrk.pressure, color='k')
+    ax3.axvline(x=0, color='r', linestyle='--')
+    ax3.set_xlabel('1e4 * Brunt-Väisälä Frequency (N²) [s⁻²]')
+    ax3.set_ylabel('Pressure (bar)')
+    ax3.set_yscale('log')
+    ax3.invert_yaxis()
+    ax3.grid(alpha=0.4)
+    ax3.set_title('Brunt-Väisälä Frequency')
 
     fig.tight_layout()
     fig.canvas.draw()
@@ -471,8 +487,20 @@ def plot_atmosphere_file(filepath, plot_outname):
     species = ['S8','S8aer','SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
     available_species = [sp for sp in species if sp in atmo_data]
 
-    fig, axs = plt.subplots(1, 3, figsize=(16, 5), dpi=100)
-    ax_tp, ax_n2, ax_chem = axs
+    # --- NEW: Load outputs.txt for precip history ---
+    try:
+        df = pd.read_csv("outputs.txt")
+        time_hr = df.iloc[:, 0] / 3600.0  # Convert s to hr
+        precip_mmhr = df.iloc[:, 2] * 3600.0 * 1000.0  # m/s to mm/hr
+        has_precip = True
+    except Exception as e:
+        print(f"Could not load outputs.txt for precip plot: {e}")
+        has_precip = False
+
+    # --- Make 4 subplots if precip history is available ---
+    ncols = 4 if has_precip else 3
+    fig, axs = plt.subplots(1, ncols, figsize=(20 if has_precip else 16, 5), dpi=100)
+    ax_tp, ax_n2, ax_chem = axs[:3]
 
     # --- T-P Profile ---
     ax_tp.plot(temperatures, pressures/1e5, color='k')
@@ -492,7 +520,6 @@ def plot_atmosphere_file(filepath, plot_outname):
     ax_n2.invert_yaxis()
     ax_n2.grid(alpha=0.4)
     ax_n2.set_title('Brunt-Väisälä Frequency')
-    #ax_n2.set_xticklabels(ax_n2.get_xticklabels(), rotation=45)
 
     # --- Chemistry ---
     for i, sp in enumerate(available_species):
@@ -507,8 +534,16 @@ def plot_atmosphere_file(filepath, plot_outname):
     ax_chem.legend(ncol=1, bbox_to_anchor=(1, 1.0), loc='upper left')
     ax_chem.set_title('Chemistry')
 
+    # --- Precip Rate vs Time ---
+    if has_precip:
+        ax_precip = axs[3]
+        ax_precip.plot(time_hr[1:], precip_mmhr[1:], color='b')
+        ax_precip.set_xlabel('Time (hr)')
+        ax_precip.set_ylabel('Precip rate (mm/hr)')
+        ax_precip.set_title('Precipitation Rate')
+        ax_precip.grid(alpha=0.4)
+
     fig.tight_layout()
-    #plt.show()
     plt.savefig(plot_outname, dpi=150, bbox_inches='tight')
 
 # Example usage

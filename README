@@ -1,4 +1,7 @@
--works with conda, then pip install pyharp
+CRANE (Chemistry and Radiation in Atmospheres with Nonlinear Evolution)
+
+-photochem works with conda environment
+-pyharp is independent of environment, just need to  pip install pyharp
 
 verions:
 
@@ -13,6 +16,4 @@ https://github.com/Nicholaswogan/photochem
 issues:
 
 right now, need to kill amars.py (main) with kill -9 PID
-
-no convective adjustment
 

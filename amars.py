@@ -4,10 +4,11 @@ import time
 import numpy as np
 from torch import zeros, tensor
 import shutil
-from pyharp import (constants,calc_dz_hypsometric)
+import pandas as pd
 
-from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions
-from photochem_utils import update_photochem_all, calc_dxdt, run_photochem_onestep, config_x_atm_from_photochem, run_photochem_onestep_andplot, load_atmosphere_file, plot_atmosphere_file
+from crane_functions import RadiationModelOptions, init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info
+from amars_rt import calc_amars_rt, calc_dTdt
+from photochem_utils import update_photochem_all, calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file
 
 from photochem import EvoAtmosphere
 
@@ -15,198 +16,6 @@ k2ndOrder = 2
 k4thOrder = 4
 kExtrapolate = 0
 kConstant = 1
-
-class RadiationModelOptions:
-    def __init__(self, ncol, nlyr, grav, mean_mol_weight, cp, aerosol_scale_factor, cSurf, kappa, 
-                 surf_sw_albedo, sr_sun, btemp0, ttemp0, solar_temp,
-                 lum_scale, nspecies, coszen, nswbin):
-        self.ncol = ncol  # Number of columns
-        self.nlyr = nlyr  # Number of layers
-        self.grav = grav  # Gravitational acceleration (m/s^2)
-        self.mean_mol_weight = mean_mol_weight  # Mean molecular weight (kg/mol)
-        self.cp = cp  # Specific heat capacity (J/(kg K))
-        self.aerosol_scale_factor = aerosol_scale_factor  # Aerosol scaling factor
-        self.cSurf = cSurf  # Surface thermal inertia (J/(m^2 K))
-        self.kappa = kappa  # Thermal diffusivity (m^2/s)
-        self.intg = {"type": "rk2"}  # Integration options (e.g., Runge-Kutta 2nd order)
-        self.surf_sw_albedo = surf_sw_albedo  # Surface shortwave albedo
-        self.sr_sun = sr_sun
-        self.btemp0 = btemp0
-        self.ttemp0 = ttemp0
-        self.solar_temp = solar_temp
-        self.lum_scale = lum_scale  # Luminosity scaling factor
-        self.nspecies = nspecies
-        self.coszen = coszen
-        self.nswbin = nswbin
-
-def config_init_model():
-    photo_dens, photo_pgrid = run_photochem_onestep(photo_binary_filename, photo_text_filename, atm, dt_photo)
-    config_x_atm_from_photochem(atm, photo_text_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(pres, options, nstr=4)
-
-    dxdt_dict = calc_dxdt(
-        photo_dens,
-        photo_binary_filename,
-        photo_text_filename,
-        dt_photo
-    )
-
-    netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options)
-
-    dTdt_atm, dTdt_surf = calc_dTdt(
-        netflux=netflux,
-        downward_flux=downward_flux,
-        atm=atm,
-        bc=bc,
-        options=options,
-        shared=shared
-    )
-
-    return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc
-
-def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys):
-
-    # 1. Update all mixing ratios in x_atm_all
-    for key in x_atm_all:
-        if key in dxdt_dict:
-            x_atm_all[key] += dxdt_dict[key] * dt_dyn
-            # Ensure non-negative
-            x_atm_all[key] = torch.clamp(x_atm_all[key], min=1e-40)
-
-    for photo_key, harp_key in zip(photo_keys, harp_keys):
-        if photo_key in x_atm_all and harp_key in atm:
-            interpolated_values = np.interp(
-                atm["pres"].squeeze().cpu().numpy(),
-                photo_pgrid[::-1] * 1e5,  # convert Photochem pressure grid to Pa
-                (x_atm_all[photo_key].squeeze().cpu().numpy())[::-1] 
-            )
-            atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)  # shape [1, nlyr]
-        else:
-            print(f"Warning: {photo_key} or {harp_key} not found in dxdt_dict or atm.")
-    return x_atm_all, atm
-
-def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn):
-    atm["temp"] += dTdt_atm * dt_dyn
-    # Ensure temperature is non-negative
-    atm["temp"] = torch.clamp(atm["temp"], min=50)
-
-    bc["btemp"] += dTdt_surf * dt_dyn
-    # Ensure surface temperature is non-negative
-    bc["btemp"] = torch.clamp(bc["btemp"], min=50)
-    return atm, bc
-
-def init_atm_isothermal(atm_temp_init, ncol, nlyr, pbot, ptop):
-    temp = atm_temp_init * torch.ones((ncol, nlyr), dtype=torch.float64)
-    pres = torch.logspace(np.log10(pbot), np.log10(ptop), nlyr, dtype=torch.float64)
-    pres = pres.unsqueeze_(0).expand(ncol, -1).contiguous()
-    xfrac = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
-    atm = {"pres": pres, "temp": temp, "xCO2": xfrac[:, :, 0], "xH2O": xfrac[:, :, 1], "xSO2": xfrac[:, :, 2], "xH2SO4aer": xfrac[:, :, 3], "xS8aer": xfrac[:, :, 4]}
-
-    return temp, pres, xfrac, atm
-
-
-def init_from_file(photo_filename, options):
-    """
-    Initialize atmospheric state from a photochem file.
-
-    Args:
-        photo_filename (str): Path to the photochem file.
-        options: Options object with .nspecies attribute.
-
-    Returns:
-        temp, pres, xfrac, atm, x_atm_all
-    """
-    import torch
-    chem_atmosphere_data = load_atmosphere_file(photo_filename)
-
-    # Get pressure and temperature from file (assume in bar and K)
-    file_pres = np.array(chem_atmosphere_data["press"])  # in bar
-    file_temp = np.array(chem_atmosphere_data["temp"])   # in K
-
-    # Create model pressure grid (in Pa)
-    pres = torch.logspace(np.log10(file_pres[0]*1e5), np.log10(file_pres[-1]*1e5), options.nlyr, dtype=torch.float64)
-    pres = pres.unsqueeze(0).expand(options.ncol, -1).contiguous()
-
-    # Interpolate temperature onto model grid (convert pres to bar for interpolation)
-    interp_temp = np.interp(
-        (pres[0].cpu().numpy() / 1e5),
-        file_pres[::-1],
-        file_temp[::-1]
-    )
-    temp = torch.tensor(interp_temp, dtype=torch.float64).unsqueeze(0).expand(options.ncol, -1).contiguous()
-
-    # Initialize xfrac as zeros, will be filled in later in program
-    xfrac = torch.zeros((options.ncol, options.nlyr, options.nspecies), dtype=torch.float64)
-
-    # Build atm dictionary (species order must match your convention)
-    atm = {
-        "pres": pres,
-        "temp": temp,
-        "xCO2": xfrac[:, :, 0],
-        "xH2O": xfrac[:, :, 1],
-        "xSO2": xfrac[:, :, 2],
-        "xH2SO4aer": xfrac[:, :, 3],
-        "xS8aer": xfrac[:, :, 4]
-    }
-
-    # Build x_atm_all dict with all species (excluding special keys)
-    exclude_keys = {"alt", "press", "den", "temp", "eddy"}
-    x_atm_all = {}
-    for key in chem_atmosphere_data:
-        if key not in exclude_keys and not key.endswith("_r"):
-            x_atm_all[key] = torch.tensor(chem_atmosphere_data[key], dtype=torch.float64).unsqueeze(0).expand(options.ncol, -1).contiguous()
-
-    return temp, pres, xfrac, atm, x_atm_all
-
-def do_convective_adjustment(atm, options):
-    tolerance = 1.01
-    dry_lapse_rate = torch.tensor(options.grav / options.cp, dtype=atm["temp"].dtype)
-    dz_btwn_levels = calc_dz_hypsometric(atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-    l2l = Layer2LevelOptions(order=k2ndOrder)
-    plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure levels for the first column
-    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-    new_temps = atm["temp"].clone()
-    dTdz_btwn_layers = torch.zeros_like(new_temps[:, :-1])
-    for k in range(options.nlyr - 1):
-        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
-
-    do_again = True
-    ntries = 0
-    max_ntries = 200
-    while do_again and ntries < max_ntries:  
-        for k in range(options.nlyr - 1):
-            dp_k = plevels[0, k] - plevels[0, k + 1]
-            dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
-            if dTdz_btwn_layers[0, k] > dry_lapse_rate:
-                new_temps[0, k + 1] = ( dp_k * (new_temps[0, k] - dry_lapse_rate * dz_btwn_layers[0, k+1]) + dp_kplus1 * new_temps[0, k + 1] ) / (dp_k + dp_kplus1)
-                new_temps[0, k] = new_temps[0, k + 1] + dry_lapse_rate * dz_btwn_layers[0, k+1]
-
-        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-        for k in range(options.nlyr - 1):
-            dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
-
-        if (dTdz_btwn_layers > dry_lapse_rate * tolerance).any():
-            do_again = True
-        else:
-            do_again = False
-        ntries += 1
-        if ntries >= max_ntries:
-            print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
-            
-    atm["temp"] = new_temps
-    return atm
-
-def calc_dq(atm, new_temps, cond_species, species_svp):
-    """
-    Calculate the change in mixing ratios for each species.
-    This is a placeholder function; actual implementation will depend on the photochemistry model.
-    """
-    dq = {}
-    for key in atm:
-        if key.startswith('x'):
-            dq[key] = torch.zeros_like(atm[key])
-    return dq
 
 if __name__ == "__main__":
     nstr = 4
@@ -233,7 +42,7 @@ if __name__ == "__main__":
         nswbin = 200 
     )
 
-    #temp, pres, xfrac, atm = init_atm_isothermal(200, options.ncol, options.nlyr, pbot, ptop)
+    #temp, pres, xfrac, atm = init_atm_isothermal(200, options.ncol, options.nlyr, pbot, ptop, options)
 
     shared = {}
 
@@ -242,20 +51,27 @@ if __name__ == "__main__":
     #for now, dt_rad and dt_photo must be multiples of dt_dyn
     dt_dyn = 86400.0/4
     dt_rad = dt_dyn
-    dt_photo = dt_dyn*4
-    t_lim = dt_dyn*2
+    dt_photo = dt_dyn
+    t_lim = dt_dyn*1000
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
+    condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
+    condensate_harp_key = 'xSO2'
     photo_init_filename = 'atmosphere_init.txt'
     photo_text_filename = 'atmosphere_intermediate.txt'
     photo_binary_filename = 'atmosphere_intermediate.bin'
     shutil.copy(photo_init_filename, photo_text_filename)
+    outputs = {
+        "tot_time": [],
+        "surface_temp": [],
+        "precip_rate": []
+    }
 
     # Load the initial atmosphere from the photochem file
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_text_filename, options)
 
     #config and init rates
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model()
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(photo_binary_filename, photo_text_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared)
 
     step = 0
     tot_time = 0.0
@@ -282,11 +98,18 @@ if __name__ == "__main__":
         
         #update the atmosphere at each dynamical time step
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn)
-        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict)
-        atm = do_convective_adjustment(atm, options)
+        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_pgrid)
+        #print("atm temp from main",atm["temp"])
+        atm, precip_rate = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key)
+        print(precip_rate)
+        outputs["tot_time"].append(tot_time)
+        outputs["surface_temp"].append(bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"])
+        outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
         tot_time += dt_dyn
         step += 1
 
+    df = pd.DataFrame(outputs)
+    df.to_csv("outputs.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]"])
     name_finaloutput = f'atmosphere_final_{tot_time:.0f}.txt'
     shutil.copy(photo_text_filename, name_finaloutput)
     plot_atmosphere_file(name_finaloutput, 'atmosphere_final.png')
