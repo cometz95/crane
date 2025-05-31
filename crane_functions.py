@@ -489,9 +489,9 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure levels for the first column
     dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
     new_temps = torch.cat([atm["temp"].clone(), atm["temp"].clone()], dim=0)
-    dTdz_btwn_layers = torch.zeros_like(new_temps[:, :-1])
+    dTdz_btwn_layers = torch.zeros_like(atm["temp"][:, :-1])
     for k in range(options.nlyr - 1):
-        dTdz_btwn_layers[:, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
 
 
 
@@ -502,33 +502,33 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     moist_lapse_rate_btwn_layers = moist_lapse_rate_btwn_layers[:, 1:-1]
     lapse_rate[1, :] = moist_lapse_rate_btwn_layers.squeeze()  # Set the lapse rate for the moist column
 
-    for moist_index in [0, 1]:
-        do_again = True
-        ntries = 0
-        max_ntries = 500
-        while do_again and ntries < max_ntries:  
-            for k in range(options.nlyr - 1):
-                dp_k = plevels[0, k] - plevels[0, k + 1]
-                dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
-                if dTdz_btwn_layers[moist_index, k] > lapse_rate[1, k]: #convection only happens when dTdz exceeds the moist lapse rate
+    do_again = True
+    ntries = 0
+    max_ntries = 500
+    while do_again and ntries < max_ntries:  
+        for k in range(options.nlyr - 1):
+            dp_k = plevels[0, k] - plevels[0, k + 1]
+            dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
+            if dTdz_btwn_layers[0, k] > lapse_rate[1, k]: #convection only happens when dTdz exceeds the moist lapse rate
+                for moist_index in [0, 1]:
                     new_temps[moist_index, k + 1] = (
                         dp_k * (new_temps[moist_index, k] - lapse_rate[moist_index, k] * dz_btwn_layers[0, k+1])
                         + dp_kplus1 * new_temps[moist_index, k + 1]
                     ) / (dp_k + dp_kplus1)
                     new_temps[moist_index, k] = new_temps[moist_index, k + 1] + lapse_rate[moist_index, k] * dz_btwn_layers[0, k+1]
 
-            dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-            dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-            for k in range(options.nlyr - 1):
-                dTdz_btwn_layers[moist_index, k] = (new_temps[moist_index, k] - new_temps[moist_index, k + 1]) / dz_btwn_layers[0, k+1]
+        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps[1, :], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
+        for k in range(options.nlyr - 1):
+            dTdz_btwn_layers[0, k] = (new_temps[1, k] - new_temps[1, k + 1]) / dz_btwn_layers[0, k+1]
 
-            if (dTdz_btwn_layers[moist_index, :] > lapse_rate[moist_index, :] * tolerance).any():
-                do_again = True
-            else:
-                do_again = False
-            ntries += 1
-            if ntries >= max_ntries:
-                print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
+        if (dTdz_btwn_layers[0, :] > lapse_rate[1, :] * tolerance).any():
+            do_again = True
+        else:
+            do_again = False
+        ntries += 1
+        if ntries >= max_ntries:
+            print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
 
     #only count precip from places where the dry column cooled
     dT = new_temps[0, :] - atm["temp"]

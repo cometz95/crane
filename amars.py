@@ -36,9 +36,9 @@ if __name__ == "__main__":
         btemp0 = 210,
         ttemp0 = 100,
         solar_temp = 5772,
-        lum_scale = 0.7,
+        lum_scale = 0.7/4,
         nspecies = 5,
-        coszen = 0.707,
+        coszen = 1,
         nswbin = 200 
     )
 
@@ -51,8 +51,9 @@ if __name__ == "__main__":
     #for now, dt_rad and dt_photo must be multiples of dt_dyn
     dt_dyn = 86400.0/4
     dt_rad = dt_dyn
-    dt_photo = dt_dyn
-    t_lim = dt_dyn*1000
+    dt_photo = dt_dyn*4
+    #t_lim = dt_dyn*4*365*10
+    t_lim = dt_dyn*100
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
     condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
