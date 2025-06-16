@@ -51,9 +51,9 @@ if __name__ == "__main__":
     #for now, dt_rad and dt_photo must be multiples of dt_dyn
     dt_dyn = 86400.0/4
     dt_rad = dt_dyn
-    dt_photo = dt_dyn*4
-    #t_lim = dt_dyn*4*365*10
-    t_lim = dt_dyn*100
+    dt_photo = dt_dyn*4*10
+    t_lim = dt_dyn*4*365*20
+    writeout_step = 20
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
     condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
@@ -65,7 +65,8 @@ if __name__ == "__main__":
     outputs = {
         "tot_time": [],
         "surface_temp": [],
-        "precip_rate": []
+        "precip_rate": [],
+        "atm": []
     }
 
     # Load the initial atmosphere from the photochem file
@@ -100,17 +101,19 @@ if __name__ == "__main__":
         #update the atmosphere at each dynamical time step
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn)
         x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_pgrid)
-        #print("atm temp from main",atm["temp"])
-        atm, precip_rate = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key)
-        print(precip_rate)
-        outputs["tot_time"].append(tot_time)
-        outputs["surface_temp"].append(bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"])
-        outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
+        atm, precip_rate = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
+
+        if step % writeout_step == 0:
+            outputs["tot_time"].append(tot_time)
+            outputs["surface_temp"].append(bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"])
+            outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
+            outputs["atm"].append(atm.item() if hasattr(atm, "item") else atm)
+
         tot_time += dt_dyn
         step += 1
 
     df = pd.DataFrame(outputs)
-    df.to_csv("outputs.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]"])
+    df.to_csv("outputs.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
     name_finaloutput = f'atmosphere_final_{tot_time:.0f}.txt'
     shutil.copy(photo_text_filename, name_finaloutput)
     plot_atmosphere_file(name_finaloutput, 'atmosphere_final.png')

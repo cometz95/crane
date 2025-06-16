@@ -414,7 +414,9 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
     svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
     rho_sat_prime = (svp_prime * condensate_properties.saturation_data.mu) / (Rgas_SI * new_temps)  # partial density of the species in the parcel at T'
     amd_layer = (rho_sat0 - rho_sat_prime) * dz
-    #print(amd_layer)
+    #print(indices_where_cooling)
+    #print('new temps - atm', new_temps-atm["temp"])
+    #print('amd layer', amd_layer)
     amd_accumulated = 0
     if indices_where_cooling.numel() > 0:
         for i in indices_where_cooling:
@@ -422,63 +424,7 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
 
     return amd_accumulated / (condensate_properties.density * dt_dyn)  #precip rate in liquid layer meters/s
 
-def do_convective_adjustment_old(atm, options, condensate_properties, dt_dyn, step):
-    tolerance = 1.01
-    dry_lapse_rate = torch.tensor(options.grav / options.cp, dtype=atm["temp"].dtype)
-    dz_btwn_levels = calc_dz_hypsometric(atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-    l2l = Layer2LevelOptions(order = k2ndOrder)
-    plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure levels for the first column
-    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-    new_temps = atm["temp"].clone()
-    dTdz_btwn_layers = torch.zeros_like(new_temps[:, :-1])
-    for k in range(options.nlyr - 1):
-        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
-
-    do_again = True
-    ntries = 0
-    max_ntries = 500
-    while do_again and ntries < max_ntries:  
-        for k in range(options.nlyr - 1):
-            dp_k = plevels[0, k] - plevels[0, k + 1]
-            dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
-            if dTdz_btwn_layers[0, k] > dry_lapse_rate:
-                new_temps[0, k + 1] = ( dp_k * (new_temps[0, k] - dry_lapse_rate * dz_btwn_layers[0, k+1]) + dp_kplus1 * new_temps[0, k + 1] ) / (dp_k + dp_kplus1)
-                new_temps[0, k] = new_temps[0, k + 1] + dry_lapse_rate * dz_btwn_layers[0, k+1]
-
-        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-        for k in range(options.nlyr - 1):
-            dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
-
-        if (dTdz_btwn_layers > dry_lapse_rate * tolerance).any():
-            do_again = True
-        else:
-            do_again = False
-        ntries += 1
-        if ntries >= max_ntries:
-            print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
-
-    #calc the dT from latent heat, assuming the column is saturated initially and remains saturated after the convective adjustment
-    dT = new_temps - atm["temp"]
-    indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
-    dT_from_latent = calc_latent_heat_dT(condensate_properties, new_temps, atm, options)
-    dT_from_latent_where_cooling = torch.zeros_like(dT_from_latent)
-    if indices_where_cooling.numel() > 0:
-        for i in indices_where_cooling:
-            if dT_from_latent[0, i] < 10:
-                dT_from_latent_where_cooling[0, i] = dT_from_latent[0, i]
-            else:
-                print("Throwing out dT from latent heat because it is too large:", dT_from_latent[0, i], "at index", i.item())
-
-    #new_temps += dT_from_latent_where_cooling  # Adjust new_temps by the latent heat effect
-    precip_rate = calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling)
-
-    atm["temp"] = new_temps
-    return atm, precip_rate
-
-
-
-def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key):
+def do_convective_adjustment_old(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad):
     tolerance = 1.01
     dry_lapse_rate = torch.tensor(options.grav / options.cp, dtype=atm["temp"].dtype)
     mmr = atm[condensate_harp_key]*(condensate_properties.saturation_data.mu/options.mean_mol_weight)  # convert mixing ratio to mass mixing ratio
@@ -530,12 +476,128 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
         if ntries >= max_ntries:
             print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
 
-    #only count precip from places where the dry column cooled
-    dT = new_temps[0, :] - atm["temp"]
+    #only count precip from places where the real(moist) column cooled
+    dT = new_temps[1, :] - atm["temp"]
+    print("new_temps - atm[temp]", new_temps - atm["temp"])
     indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
+    print(indices_where_cooling)
     #calc how much precip fell out of the column due to dry cooling, before latent heat adjustment
+
     precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling)
+
+    check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate)
 
     atm["temp"][0, :] = new_temps[1, :]  # Update the temperature to the moist column's temperature
     #print("atm from end do_convective_adjustment", atm["temp"])
     return atm, precip_rate
+
+def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad):
+    tolerance = 1.01
+    mmr = atm[condensate_harp_key]*(condensate_properties.saturation_data.mu/options.mean_mol_weight)  # convert mixing ratio to mass mixing ratio
+    #MLR from Emanuel 1993, eqn 4.7.3
+    moist_lapse_rate = (options.grav / options.cp) * ( (1 + mmr)/(1 + mmr * condensate_properties.cp(atm["temp"])/ options.cp) ) * ((1 + (condensate_properties.saturation_data.latent_heat(atm["temp"]) * mmr * options.mean_mol_weight)/(Rgas_SI * atm["temp"]))/(1 + (mmr*(1+mmr*(options.mean_mol_weight/condensate_properties.saturation_data.mu))*condensate_properties.saturation_data.latent_heat(atm["temp"])**2)/((Rgas_SI/condensate_properties.saturation_data.mu)*(options.cp + mmr * condensate_properties.cp(atm["temp"]))*atm["temp"]**2)))
+    dz_btwn_levels = calc_dz_hypsometric(atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+    l2l = Layer2LevelOptions(order = k2ndOrder)
+    plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure levels for the first column
+    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
+    new_temps = atm["temp"].clone()
+    dTdz_btwn_layers = torch.zeros_like(atm["temp"][:, :-1])
+    for k in range(options.nlyr - 1):
+        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+
+    lapse_rate = torch.ones_like(new_temps[:, :-1])
+    moist_lapse_rate_btwn_layers = layer2level(dz_btwn_levels, moist_lapse_rate, l2l)
+    moist_lapse_rate_btwn_layers = moist_lapse_rate_btwn_layers[:, 1:-1]
+    lapse_rate[0, :] = moist_lapse_rate_btwn_layers.squeeze()  # Set the lapse rate for the moist column
+
+    do_again = True
+    ntries = 0
+    max_ntries = 500
+    while do_again and ntries < max_ntries:  
+        for k in range(options.nlyr - 1):
+            dp_k = plevels[0, k] - plevels[0, k + 1]
+            dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
+            if dTdz_btwn_layers[0, k] > lapse_rate[0, k]: #convection only happens when dTdz exceeds the moist lapse rate
+                new_temps[0, k + 1] = (
+                    dp_k * (new_temps[0, k] - lapse_rate[0, k] * dz_btwn_layers[0, k+1])
+                    + dp_kplus1 * new_temps[0, k + 1]
+                ) / (dp_k + dp_kplus1)
+                new_temps[0, k] = new_temps[0, k + 1] + lapse_rate[0, k] * dz_btwn_layers[0, k+1]
+
+        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps[0, :], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
+        for k in range(options.nlyr - 1):
+            dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+
+        if (dTdz_btwn_layers[0, :] > lapse_rate[0, :] * tolerance).any():
+            do_again = True
+        else:
+            do_again = False
+        ntries += 1
+        if ntries >= max_ntries:
+            print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
+
+    #only count precip from places where the column cooled
+    dT = new_temps[0, :] - atm["temp"]
+    #print("new_temps - atm[temp]", new_temps - atm["temp"])
+    indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
+    #print(indices_where_cooling)
+    #calc how much precip fell out of the column
+    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling)
+
+    check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate)
+
+    atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
+    return atm, precip_rate
+
+def check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate):
+    Tprime = atm["temp"] + dTdt_rad * dt_dyn
+    #print("dT_rad: ", dTdt_rad * dt_dyn)
+    
+    fake_dict = {"temp": Tprime, 
+                 "pres": atm["pres"]}
+    old_temps = atm["temp"]
+
+    pseudo_precip_rate = calc_precip_rate(fake_dict, old_temps, options, condensate_properties, dt_dyn, indices_where_cooling)
+
+    return pseudo_precip_rate
+
+
+def plot_outputs(filename, window_size):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    # Load the data
+    df = pd.read_csv(filename)
+    time_hr = df["tot_time [s]"] / 3600.0  # Convert seconds to hours
+    precip_mmhr = df["precip_rate [m/s]"] * 3600.0 * 1000.0  # Convert m/s to mm/hr
+    btemp = df["surface_temp [K]"]
+
+    # Compute moving average
+    precip_ma = precip_mmhr.rolling(window=window_size, center=True, min_periods=1).mean()
+
+    # Plot
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    ax1.plot(time_hr, precip_mmhr, label="Raw Precip Rate", alpha=0.5, color='tab:blue')
+    ax1.plot(time_hr, precip_ma, label=f"Precip MA (window={window_size})", linewidth=2, color='tab:cyan')
+    ax1.set_xlabel("Time (hr)")
+    ax1.set_ylabel("Precipitation Rate (mm/hr)", color='tab:blue')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1.legend(loc="upper left")
+    ax1.grid(alpha=0.3)
+
+    # Add surface temperature on a secondary y-axis
+    ax2 = ax1.twinx()
+    ax2.plot(time_hr, btemp, label="Surface Temp (K)", color='tab:red')
+    ax2.set_ylabel("Surface Temperature (K)", color='tab:red')
+    ax2.tick_params(axis='y', labelcolor='tab:red')
+    ax2.legend(loc="upper right")
+
+    plt.title("Precipitation Rate and Surface Temperature vs Time")
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    plot_outputs("outputs.txt", 20)  # Change window_size as needed
+    

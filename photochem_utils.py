@@ -131,7 +131,7 @@ def run_photochem_onestep(photo_binary_filename, photo_text_filename, atm, dt_ph
     pc = EvoAtmosphere(
     'zahnle_amars.yaml',
     'settings.yaml',
-    'Sun_3.5Ga.txt',
+    'Sun_3.5Ga_s0_4.txt',
     photo_text_filename
     )
 
@@ -195,7 +195,7 @@ def run_photochem_onestep_andplot(photo_binary_filename, photo_text_filename, at
     with suppress_fortran_output():
         pc.evolve(photo_binary_filename, tstart, pc.wrk.usol, np.array([dt_photo]), overwrite=True)
 
-    plot_chem_each_timestep(pc)
+    #plot_chem_each_timestep(pc)
 
     return photo_dens, photo_pgrid
 
