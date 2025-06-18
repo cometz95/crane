@@ -33,7 +33,7 @@ if __name__ == "__main__":
         kappa=2.0e-2,  # Thermal diffusivity (m^2/s)
         surf_sw_albedo = 0.3,
         sr_sun = 2.92842e-5,
-        btemp0 = 210,
+        btemp0 = 219,
         ttemp0 = 100,
         solar_temp = 5772,
         lum_scale = 0.7/4,
@@ -51,8 +51,8 @@ if __name__ == "__main__":
     #for now, dt_rad and dt_photo must be multiples of dt_dyn
     dt_dyn = 86400.0/4
     dt_rad = dt_dyn
-    dt_photo = dt_dyn*4*10
-    t_lim = dt_dyn*4*365*20
+    dt_photo = dt_dyn
+    t_lim = dt_dyn*4
     writeout_step = 20
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
@@ -108,12 +108,15 @@ if __name__ == "__main__":
             outputs["surface_temp"].append(bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"])
             outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
             outputs["atm"].append(atm.item() if hasattr(atm, "item") else atm)
+            df = pd.DataFrame(outputs)
+            df.to_csv("outputs_int.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
 
         tot_time += dt_dyn
         step += 1
+        print(step)
 
     df = pd.DataFrame(outputs)
-    df.to_csv("outputs.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
+    df.to_csv("outputs_final.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
     name_finaloutput = f'atmosphere_final_{tot_time:.0f}.txt'
     shutil.copy(photo_text_filename, name_finaloutput)
     plot_atmosphere_file(name_finaloutput, 'atmosphere_final.png')

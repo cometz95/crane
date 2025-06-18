@@ -105,6 +105,8 @@ def config_amars_rt_init(pres, options, nstr=4):
 
     # configure bands
     for name, band in rad_op.bands().items():
+        #absorber_names = list(band.opacities().keys())
+        #band.ww(band.query_weights(absorber_names[0]))
         band.ww(band.query_weights())
         nwave = len(band.ww()) if name != "SW" else options.nswbin
 
@@ -125,6 +127,7 @@ def config_amars_rt_init(pres, options, nstr=4):
             )
             bc[name + "/umu0"] = options.coszen * ones((ncol,), dtype=torch.float64)
         else:  # longwave
+            #band.ww(band.query_weights())
             band.disort().wave_lower([wmin] * nwave)
             band.disort().wave_upper([wmax] * nwave)
             bc[name + "/albedo"] = zeros((nwave, ncol), dtype=torch.float64)
@@ -134,7 +137,6 @@ def config_amars_rt_init(pres, options, nstr=4):
     bc["ttemp"] = options.ttemp0 * ones((ncol,), dtype=torch.float64)
 
     # construct radiation model
-    # print("radiation options:\n", rad_op)
     rad = Radiation(rad_op)
     return rad, bc
 
@@ -172,12 +174,8 @@ def calc_amars_rt(rad, atm, bc, options):
     conc[:, :, 3] = atm["xH2SO4aer"] * options.aerosol_scale_factor
     conc[:, :, 4] = atm["xS8aer"]  * options.aerosol_scale_factor
 
-    # conc *= atm["pres"].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
     conc *= atm["pres"].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
-    netflux = rad.forward(conc, dz, bc, atm)
-
-    downward_flux = harp.shared()["radiation/downward_flux"]
-    upward_flux = harp.shared()["radiation/upward_flux"]
+    netflux, downward_flux, upward_flux = rad.forward(conc, dz, bc, atm)
 
     return netflux, downward_flux, upward_flux
 

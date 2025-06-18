@@ -405,12 +405,13 @@ def calc_latent_heat_dT(condensate_properties, Tprime, atm, options):
 
 #amd = aerial mass density kg/m^2
 #assumes the parcel is saturated at T0 and T'
-def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling):
+def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key):
     #print("atm from calc_precip_rate:", atm["temp"])
     #print("new_temps from calc_precip_rate:", new_temps)
     dz = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-    svp0 = condensate_properties.saturation_data.sat_pressure(atm["temp"])  # Saturation vapor pressure at T0
-    rho_sat0 = (svp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * atm["temp"])  # partial density of the species in the parcel
+    #vp0 = condensate_properties.saturation_data.sat_pressure(atm["temp"])  # Saturation vapor pressure at T0
+    vp0 = atm[condensate_harp_key] * atm["pres"] #use the real vapor pressure that the condensate was at, don't assume saturation
+    rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * atm["temp"])  # partial density of the species in the parcel
     svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
     rho_sat_prime = (svp_prime * condensate_properties.saturation_data.mu) / (Rgas_SI * new_temps)  # partial density of the species in the parcel at T'
     amd_layer = (rho_sat0 - rho_sat_prime) * dz
@@ -420,7 +421,8 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
     amd_accumulated = 0
     if indices_where_cooling.numel() > 0:
         for i in indices_where_cooling:
-            amd_accumulated += amd_layer[0, i]
+            if amd_layer[0, i] > 0: #only add if condensation occured, meaning that the temp got low enough to condense
+                amd_accumulated += amd_layer[0, i]
 
     return amd_accumulated / (condensate_properties.density * dt_dyn)  #precip rate in liquid layer meters/s
 
@@ -483,7 +485,7 @@ def do_convective_adjustment_old(atm, options, condensate_properties, dt_dyn, co
     print(indices_where_cooling)
     #calc how much precip fell out of the column due to dry cooling, before latent heat adjustment
 
-    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling)
+    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
 
     check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate)
 
@@ -543,22 +545,23 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
     #print(indices_where_cooling)
     #calc how much precip fell out of the column
-    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling)
+    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
 
-    check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate)
+    check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key)
 
     atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
     return atm, precip_rate
 
-def check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate):
+def check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key):
     Tprime = atm["temp"] + dTdt_rad * dt_dyn
     #print("dT_rad: ", dTdt_rad * dt_dyn)
     
     fake_dict = {"temp": Tprime, 
-                 "pres": atm["pres"]}
+                 "pres": atm["pres"],
+                 condensate_harp_key: atm[condensate_harp_key]}
     old_temps = atm["temp"]
 
-    pseudo_precip_rate = calc_precip_rate(fake_dict, old_temps, options, condensate_properties, dt_dyn, indices_where_cooling)
+    pseudo_precip_rate = calc_precip_rate(fake_dict, old_temps, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
 
     return pseudo_precip_rate
 
