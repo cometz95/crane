@@ -5,6 +5,7 @@ import numpy as np
 from torch import zeros, tensor
 import shutil
 import pandas as pd
+import copy
 
 from crane_functions import RadiationModelOptions, init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info
 from amars_rt import calc_amars_rt, calc_dTdt
@@ -33,7 +34,7 @@ if __name__ == "__main__":
         kappa=2.0e-2,  # Thermal diffusivity (m^2/s)
         surf_sw_albedo = 0.3,
         sr_sun = 2.92842e-5,
-        btemp0 = 219,
+        btemp0 = 185.272,
         ttemp0 = 100,
         solar_temp = 5772,
         lum_scale = 0.7/4,
@@ -51,9 +52,9 @@ if __name__ == "__main__":
     #for now, dt_rad and dt_photo must be multiples of dt_dyn
     dt_dyn = 86400.0/4
     dt_rad = dt_dyn
-    dt_photo = dt_dyn
-    t_lim = dt_dyn*4
-    writeout_step = 20
+    dt_photo = dt_dyn*4
+    t_lim = dt_dyn*4*365*10
+    writeout_step = 1
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
     condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
@@ -107,7 +108,7 @@ if __name__ == "__main__":
             outputs["tot_time"].append(tot_time)
             outputs["surface_temp"].append(bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"])
             outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
-            outputs["atm"].append(atm.item() if hasattr(atm, "item") else atm)
+            outputs["atm"].append(copy.deepcopy(atm))
             df = pd.DataFrame(outputs)
             df.to_csv("outputs_int.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
 

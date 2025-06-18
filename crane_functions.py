@@ -4,6 +4,9 @@ import numpy as np
 import torch
 from torch import zeros, tensor
 from pyharp import (constants,calc_dz_hypsometric)
+import matplotlib.pyplot as plt
+import ast
+import re
 
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions
 from photochem_utils import calc_dxdt, run_photochem_onestep, config_x_atm_from_photochem, load_atmosphere_file
@@ -426,73 +429,6 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
 
     return amd_accumulated / (condensate_properties.density * dt_dyn)  #precip rate in liquid layer meters/s
 
-def do_convective_adjustment_old(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad):
-    tolerance = 1.01
-    dry_lapse_rate = torch.tensor(options.grav / options.cp, dtype=atm["temp"].dtype)
-    mmr = atm[condensate_harp_key]*(condensate_properties.saturation_data.mu/options.mean_mol_weight)  # convert mixing ratio to mass mixing ratio
-    #MLR from Emanuel 1993, eqn 4.7.3
-    moist_lapse_rate = (options.grav / options.cp) * ( (1 + mmr)/(1 + mmr * condensate_properties.cp(atm["temp"])/ options.cp) ) * ((1 + (condensate_properties.saturation_data.latent_heat(atm["temp"]) * mmr * options.mean_mol_weight)/(Rgas_SI * atm["temp"]))/(1 + (mmr*(1+mmr*(options.mean_mol_weight/condensate_properties.saturation_data.mu))*condensate_properties.saturation_data.latent_heat(atm["temp"])**2)/((Rgas_SI/condensate_properties.saturation_data.mu)*(options.cp + mmr * condensate_properties.cp(atm["temp"]))*atm["temp"]**2)))
-    dz_btwn_levels = calc_dz_hypsometric(atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-    l2l = Layer2LevelOptions(order = k2ndOrder)
-    plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure levels for the first column
-    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-    new_temps = torch.cat([atm["temp"].clone(), atm["temp"].clone()], dim=0)
-    dTdz_btwn_layers = torch.zeros_like(atm["temp"][:, :-1])
-    for k in range(options.nlyr - 1):
-        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
-
-
-
-    #first column is dry, second column is moist
-    lapse_rate = torch.ones_like(new_temps[:, :-1])
-    lapse_rate[0, :] = dry_lapse_rate
-    moist_lapse_rate_btwn_layers = layer2level(dz_btwn_levels, moist_lapse_rate, l2l)
-    moist_lapse_rate_btwn_layers = moist_lapse_rate_btwn_layers[:, 1:-1]
-    lapse_rate[1, :] = moist_lapse_rate_btwn_layers.squeeze()  # Set the lapse rate for the moist column
-
-    do_again = True
-    ntries = 0
-    max_ntries = 500
-    while do_again and ntries < max_ntries:  
-        for k in range(options.nlyr - 1):
-            dp_k = plevels[0, k] - plevels[0, k + 1]
-            dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
-            if dTdz_btwn_layers[0, k] > lapse_rate[1, k]: #convection only happens when dTdz exceeds the moist lapse rate
-                for moist_index in [0, 1]:
-                    new_temps[moist_index, k + 1] = (
-                        dp_k * (new_temps[moist_index, k] - lapse_rate[moist_index, k] * dz_btwn_layers[0, k+1])
-                        + dp_kplus1 * new_temps[moist_index, k + 1]
-                    ) / (dp_k + dp_kplus1)
-                    new_temps[moist_index, k] = new_temps[moist_index, k + 1] + lapse_rate[moist_index, k] * dz_btwn_layers[0, k+1]
-
-        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps[1, :], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
-        for k in range(options.nlyr - 1):
-            dTdz_btwn_layers[0, k] = (new_temps[1, k] - new_temps[1, k + 1]) / dz_btwn_layers[0, k+1]
-
-        if (dTdz_btwn_layers[0, :] > lapse_rate[1, :] * tolerance).any():
-            do_again = True
-        else:
-            do_again = False
-        ntries += 1
-        if ntries >= max_ntries:
-            print("Warning: Maximum number of iterations reached in convective adjustment, stopping. Something is probably wrong.")
-
-    #only count precip from places where the real(moist) column cooled
-    dT = new_temps[1, :] - atm["temp"]
-    print("new_temps - atm[temp]", new_temps - atm["temp"])
-    indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
-    print(indices_where_cooling)
-    #calc how much precip fell out of the column due to dry cooling, before latent heat adjustment
-
-    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
-
-    check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate)
-
-    atm["temp"][0, :] = new_temps[1, :]  # Update the temperature to the moist column's temperature
-    #print("atm from end do_convective_adjustment", atm["temp"])
-    return atm, precip_rate
-
 def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad):
     tolerance = 1.01
     mmr = atm[condensate_harp_key]*(condensate_properties.saturation_data.mu/options.mean_mol_weight)  # convert mixing ratio to mass mixing ratio
@@ -514,7 +450,7 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
 
     do_again = True
     ntries = 0
-    max_ntries = 500
+    max_ntries = 2000
     while do_again and ntries < max_ntries:  
         for k in range(options.nlyr - 1):
             dp_k = plevels[0, k] - plevels[0, k + 1]
@@ -599,8 +535,76 @@ def plot_outputs(filename, window_size):
 
     plt.title("Precipitation Rate and Surface Temperature vs Time")
     plt.tight_layout()
+    plt.savefig('precip_btemp_plot.png')
+
+class AtmHistoryAccessor:
+    def __init__(self, df, atm_col="atm(pres [Pa], temp [K], xfrac [mol/mol])"):
+        self.atm_strings = df[atm_col]
+        self._cache = {}
+
+    def __getitem__(self, idx):
+        if idx not in self._cache:
+            # Only allow 'tensor' and 'torch' in eval's globals for safety
+            self._cache[idx] = eval(self.atm_strings.iloc[idx], {"tensor": torch.tensor, "torch": torch, "__builtins__": {}})
+        return self._cache[idx]
+
+def read_atm_history(filename):
+    import pandas as pd
+    import ast
+    """
+    Reads the outputs.txt file and returns a list of atm dicts, one per timestep.
+    Each dict contains tensors for 'pres', 'temp', and species mole fractions.
+    """
+    df = pd.read_csv(filename)
+    atm = AtmHistoryAccessor(df)  
+    return atm
+
+
+def parse_tensor_string(tensor_str):
+    # This regex matches floats, including scientific notation (e.g., 1.23e-10)
+    numbers = re.findall(r'[-+]?\d*\.\d+(?:[eE][-+]?\d+)?|[-+]?\d+(?:[eE][-+]?\d+)?', tensor_str)
+    arr = np.array([float(x) for x in numbers])
+    return arr
+
+def parse_atm_dict(atm_str):
+    atm_dict = {}
+    atm_str = atm_str.replace('\n', ' ')
+    pattern = r"'(\w+)': tensor\((\[\[.*?\]\])"
+    for match in re.finditer(pattern, atm_str):
+        key = match.group(1)
+        val = match.group(2)
+        atm_dict[key] = parse_tensor_string(val)
+    return atm_dict
+
+
+def plot_pt_history(in_name, out_name, key_to_look_at):
+    #atm = read_atm_history(in_name)
+    # Usage:
+    import pandas as pd
+    df = pd.read_csv(in_name)
+    atm_strings = df["atm(pres [Pa], temp [K], xfrac [mol/mol])"]
+    atm = [parse_atm_dict(s) for s in atm_strings]
+    first_index = 0
+    last_index = -1
+    plt.figure()
+    plt.plot(atm[first_index][key_to_look_at], atm[first_index]["pres"],label='Initial')
+    #plt.plot(atm[55][key_to_look_at], atm[55]["pres"],label='mid')
+    plt.plot(atm[last_index][key_to_look_at], atm[last_index]["pres"], label='Final')
+    print(atm[last_index][key_to_look_at] - atm[first_index][key_to_look_at])
+    plt.gca().invert_yaxis()  # Flip y-axis so pressure decreases upward
+    plt.xlabel("Temperature (K)")
+    plt.ylabel("Pressure (Pa)")
+    plt.title("P-T Profile")
+    plt.yscale("log")  # Log scale for pressure
+    #plt.xscale("log")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
     plt.show()
 
 if __name__ == "__main__":
-    plot_outputs("outputs.txt", 20)  # Change window_size as needed
+    #plot_outputs("outputs_int.txt", 20)  # Change window_size as needed
+    plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "temp")
+    plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xH2SO4aer")
+    plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xS8aer")
     
