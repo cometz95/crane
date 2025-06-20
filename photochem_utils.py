@@ -58,7 +58,8 @@ def plot_chem_each_timestep(pc):
     ax3.cla()
 
     sol = pc.mole_fraction_dict()
-    species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
+    #species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
+    species = ['SO2']
         # Calculate Brunt-Väisälä frequency
     N2 = calc_brunt_vaisala_frequency(pc.var.temperature, pc.wrk.pressure/1e6)
 
@@ -85,7 +86,8 @@ def plot_chem_each_timestep(pc):
     ax2.set_yscale('log')
     ax2.invert_yaxis()
     ax2.grid(alpha=0.4)
-    ax2.set_xlim(1e-20, 1e3)
+    #ax2.set_xlim(1e-20, 1e3)
+    ax2.set_xlim(1e-4, 1e-1)
     ax2.set_ylabel('Pressure (bar)')
     ax2.set_xlabel('Mixing ratio')
     ax2.legend(ncol=1, bbox_to_anchor=(1, 1.0), loc='upper left')
@@ -103,6 +105,29 @@ def plot_chem_each_timestep(pc):
     ax3.set_title('Brunt-Väisälä Frequency')
 
     fig.tight_layout()
+    fig.canvas.draw()
+    plt.pause(0.001)  # <-- This line allows KeyboardInterrupt to be processed
+
+def plot_rh_each_timestep(pc, fig, axs):
+    axs.cla()
+
+    sol = pc.mole_fraction_dict()
+    species = ['SO2']
+
+    # Plot chemistry
+    for i, sp in enumerate(species):
+        if sp+'aer' in pc.dat.species_names[:pc.dat.np]:
+            ind = pc.dat.species_names.index(sp+'aer')
+            saturation = pc.dat.particle_sat[ind].sat_pressure
+            mix = [pc.var.cond_params[ind].RHc*saturation(T)/pc.wrk.pressure[j] for j,T in enumerate(pc.var.temperature)]
+            axs.plot(sol[sp]/mix, pc.wrk.pressure/1e6, c='C'+str(i), ls='--', alpha=0.7)
+            axs.invert_yaxis()
+            axs.set_xlabel('Relative Humidity')
+            axs.set_ylabel('Pressure (bar)')
+            axs.set_yscale('log')
+            print(sol[sp]/mix)
+
+
     fig.canvas.draw()
     plt.pause(0.001)  # <-- This line allows KeyboardInterrupt to be processed
 
@@ -187,8 +212,8 @@ def run_photochem_onestep_andplot(photo_binary_filename, photo_text_filename, at
     # Change particle free params
     for i in range(pc.dat.np):
         pc.var.cond_params[i].smooth_factor = 10 # Bigger numbers help integration converge.
-        pc.var.cond_params[i].k_evap = 0.1 # Evaporation rate constant
-        pc.var.cond_params[i].k_cond = 1000 # Condensation rate constant
+        pc.var.cond_params[i].k_evap = 0 # Evaporation rate constant
+        pc.var.cond_params[i].k_cond = 10000 # Condensation rate constant
 
     tstart = 0.0
     #evolve the atmosphere by dt_photo seconds
@@ -196,6 +221,9 @@ def run_photochem_onestep_andplot(photo_binary_filename, photo_text_filename, at
         pc.evolve(photo_binary_filename, tstart, pc.wrk.usol, np.array([dt_photo]), overwrite=True)
 
     #plot_chem_each_timestep(pc)
+    
+    #need to modify the function argument to pass fig and axs before using the rh plotter
+    #plot_rh_each_timestep(pc, fig, axs)
 
     return photo_dens, photo_pgrid
 
@@ -546,6 +574,21 @@ def plot_atmosphere_file(filepath, plot_outname):
     fig.tight_layout()
     plt.savefig(plot_outname, dpi=150, bbox_inches='tight')
 
+def test_whats_going_on(photo_binary_filename, photo_keys):
+    sol = evo_read_evolve_output(photo_binary_filename)
+    print(sol)
+
+    # Extract the species names and find the indices for the photochem keys
+    species_names = sol['species_names']
+    photo_key_indices = {key: species_names.index(key) for key in photo_keys}
+
+    updates_photo = {}
+
+    for key, index in photo_key_indices.items():
+        usol_values = sol['usol'][index, :, -1]  # Extract the last time step for the species
+        updates_photo[key] = usol_values
+        print(f"{key}: {usol_values}")
+
 # Example usage
 if __name__ == "__main__":
     #old_filepath = "atmosphere_init.txt"
@@ -556,6 +599,8 @@ if __name__ == "__main__":
 
     #setup_presure_grid(nlyr=len(atmosphere_data["press"]), pbot=0.5, ptop=1e-7)
 
-    file_to_plot = 'atmosphere_intermediate.txt'
-    plot_outname = 'atmosphere_int.png'
-    plot_atmosphere_file('atmosphere_intermediate.txt', plot_outname)
+    #file_to_plot = 'atmosphere_intermediate.txt'
+    #plot_outname = 'atmosphere_int.png'
+    #plot_atmosphere_file('atmosphere_intermediate.txt', plot_outname)
+    pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
+    test_whats_going_on('atmosphere_intermediate.bin', pchem_species_dict)

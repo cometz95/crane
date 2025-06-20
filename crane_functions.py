@@ -7,6 +7,7 @@ from pyharp import (constants,calc_dz_hypsometric)
 import matplotlib.pyplot as plt
 import ast
 import re
+import pandas as pd
 
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions
 from photochem_utils import calc_dxdt, run_photochem_onestep, config_x_atm_from_photochem, load_atmosphere_file
@@ -413,6 +414,7 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
     #print("new_temps from calc_precip_rate:", new_temps)
     dz = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
     #vp0 = condensate_properties.saturation_data.sat_pressure(atm["temp"])  # Saturation vapor pressure at T0
+    #vp0 = condensate_properties.saturation_data.sat_pressure(new_temps)  # Saturation vapor pressure at T0
     vp0 = atm[condensate_harp_key] * atm["pres"] #use the real vapor pressure that the condensate was at, don't assume saturation
     rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * atm["temp"])  # partial density of the species in the parcel
     svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
@@ -427,7 +429,29 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
             if amd_layer[0, i] > 0: #only add if condensation occured, meaning that the temp got low enough to condense
                 amd_accumulated += amd_layer[0, i]
 
-    return amd_accumulated / (condensate_properties.density * dt_dyn)  #precip rate in liquid layer meters/s
+    return amd_accumulated / (condensate_properties.density * dt_dyn), amd_layer  #precip rate in liquid layer meters/s
+
+def calc_pseudo_precip_rate(atm, old_temps, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling):
+    #print("atm from calc_precip_rate:", atm["temp"])
+    #print("new_temps from calc_precip_rate:", new_temps)
+    dz = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+    #vp0 = condensate_properties.saturation_data.sat_pressure(atm["temp"])  # Saturation vapor pressure at T0
+    vp0 = condensate_properties.saturation_data.sat_pressure(old_temps)  # Saturation vapor pressure at T0
+    #vp0 = atm[condensate_harp_key] * atm["pres"] #use the real vapor pressure that the condensate was at, don't assume saturation
+    rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * old_temps)  # partial density of the species in the parcel
+    svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
+    rho_sat_prime = (svp_prime * condensate_properties.saturation_data.mu) / (Rgas_SI * new_temps)  # partial density of the species in the parcel at T'
+    amd_layer = (rho_sat_prime - rho_sat0) * dz
+    #print(indices_where_cooling)
+    #print('new temps - atm', new_temps-atm["temp"])
+    #print('amd layer', amd_layer)
+    amd_accumulated = 0
+    if indices_where_cooling.numel() > 0:
+        for i in indices_where_cooling:
+            if amd_layer[0, i] > 0: #only add if condensation occured, meaning that the temp got low enough to condense
+                amd_accumulated += amd_layer[0, i]
+
+    return amd_accumulated / (condensate_properties.density * dt_dyn), amd_layer  #precip rate in liquid layer meters/s
 
 def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad):
     tolerance = 1.01
@@ -481,31 +505,31 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
     #print(indices_where_cooling)
     #calc how much precip fell out of the column
-    precip_rate = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
+    precip_rate, amd_layer = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
 
     check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key)
 
     atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
-    return atm, precip_rate
+    return atm, precip_rate, amd_layer
 
 def check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key):
-    Tprime = atm["temp"] + dTdt_rad * dt_dyn
+    old_temps = atm["temp"] - dTdt_rad * dt_dyn
     #print("dT_rad: ", dTdt_rad * dt_dyn)
     
-    fake_dict = {"temp": Tprime, 
+    fake_dict = {"temp": old_temps, 
                  "pres": atm["pres"],
                  condensate_harp_key: atm[condensate_harp_key]}
-    old_temps = atm["temp"]
 
-    pseudo_precip_rate = calc_precip_rate(fake_dict, old_temps, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
+    pseudo_precip_rate, amd_pseudo = calc_pseudo_precip_rate(atm, old_temps, atm["temp"], options, condensate_properties, dt_dyn, indices_where_cooling)
+    #pseudo_precip_rate, amd_pseudo = calc_precip_rate(atm, Tprime, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
+    print('pseudo precip rate: ', pseudo_precip_rate)
+    #print("dTdt_rad * dt_dyn: ", dTdt_rad * dt_dyn)
+    #print("atm - new_temps: ", atm["temp"] - new_temps)
 
     return pseudo_precip_rate
 
 
-def plot_outputs(filename, window_size):
-    import pandas as pd
-    import matplotlib.pyplot as plt
-
+def plot_outputs(filename, window_size, first_indices_to_skip):
     # Load the data
     df = pd.read_csv(filename)
     time_hr = df["tot_time [s]"] / 3600.0  # Convert seconds to hours
@@ -516,10 +540,10 @@ def plot_outputs(filename, window_size):
     precip_ma = precip_mmhr.rolling(window=window_size, center=True, min_periods=1).mean()
 
     # Plot
-    fig, ax1 = plt.subplots(figsize=(10, 5))
+    fig, ax1 = plt.subplots(figsize=(20, 5))
 
-    ax1.plot(time_hr, precip_mmhr, label="Raw Precip Rate", alpha=0.5, color='tab:blue')
-    ax1.plot(time_hr, precip_ma, label=f"Precip MA (window={window_size})", linewidth=2, color='tab:cyan')
+    ax1.plot(time_hr[first_indices_to_skip:], precip_mmhr[first_indices_to_skip:], label="Raw Precip Rate", alpha=0.5, color='tab:blue')
+    ax1.plot(time_hr[first_indices_to_skip:], precip_ma[first_indices_to_skip:], label=f"Precip MA (window={window_size})", linewidth=2, color='tab:cyan')
     ax1.set_xlabel("Time (hr)")
     ax1.set_ylabel("Precipitation Rate (mm/hr)", color='tab:blue')
     ax1.tick_params(axis='y', labelcolor='tab:blue')
@@ -528,14 +552,19 @@ def plot_outputs(filename, window_size):
 
     # Add surface temperature on a secondary y-axis
     ax2 = ax1.twinx()
-    ax2.plot(time_hr, btemp, label="Surface Temp (K)", color='tab:red')
+    ax2.plot(time_hr[first_indices_to_skip:], btemp[first_indices_to_skip:], label="Surface Temp (K)", color='tab:red')
     ax2.set_ylabel("Surface Temperature (K)", color='tab:red')
     ax2.tick_params(axis='y', labelcolor='tab:red')
     ax2.legend(loc="upper right")
 
+    #for ax in (ax1, ax2):
+        #ax.set_xlim(time_hr.iloc[first_indices_to_skip], time_hr.iloc[-1])
+        #ax.set_xlim(0, 35000)
+
     plt.title("Precipitation Rate and Surface Temperature vs Time")
     plt.tight_layout()
     plt.savefig('precip_btemp_plot.png')
+    plt.clf()
 
 class AtmHistoryAccessor:
     def __init__(self, df, atm_col="atm(pres [Pa], temp [K], xfrac [mol/mol])"):
@@ -580,7 +609,6 @@ def parse_atm_dict(atm_str):
 def plot_pt_history(in_name, out_name, key_to_look_at):
     #atm = read_atm_history(in_name)
     # Usage:
-    import pandas as pd
     df = pd.read_csv(in_name)
     atm_strings = df["atm(pres [Pa], temp [K], xfrac [mol/mol])"]
     atm = [parse_atm_dict(s) for s in atm_strings]
@@ -602,9 +630,69 @@ def plot_pt_history(in_name, out_name, key_to_look_at):
     plt.tight_layout()
     plt.show()
 
+def plot_precip_history(in_name,ignore_first_indices,window_size):
+    df = pd.read_csv(in_name)
+    time_hr = df.iloc[:, 0] / 3600.0  # Convert s to hr
+    precip_mmhr = df.iloc[:, 2] * 3600.0 * 1000.0  # m/s to mm/hr
+    precip_ma = precip_mmhr.rolling(window=window_size, center=True, min_periods=1).mean()
+    plt.figure(figsize=(20, 5))
+    plt.plot(time_hr[ignore_first_indices:],precip_mmhr[ignore_first_indices:])
+    plt.plot(time_hr[ignore_first_indices:],precip_ma[ignore_first_indices:],label="ma")
+    #plt.xlim(25000,30000)
+    #plt.ylim(0,1)
+    plt.xlabel("time [hr]")
+    plt.ylabel('precip rate [mm/hr]')
+    plt.show()
+
+def plot_convective_adjustment(atm_before, atm_after, precip_rate, amd_layer, fig, axs):
+    ax1, ax2, ax3 = axs  # Unpack the three subplots
+
+    # --- Temperature difference plot ---
+    ax1.cla()
+    temp_before = np.array(atm_before["temp"]).flatten()
+    temp_after = np.array(atm_after["temp"]).flatten()
+    pres = np.array(atm_before["pres"]).flatten()/1e5  # Pressure in bar
+    temp_diff = temp_after - temp_before
+
+    ax1.plot(temp_diff, pres, 'k-', label='After - Before')
+    ax1.fill_betweenx(pres, 0, temp_diff, where=(temp_diff < 0), color='blue', alpha=0.3, label='Cooling')
+    ax1.set_xlabel("Temperature Difference (K)")
+    ax1.set_ylabel("Pressure (bar)")
+    ax1.set_title("Temperature Change Due to Convective Adjustment")
+    ax1.invert_yaxis()
+    ax1.legend()
+    ax1.grid(True)
+
+    # --- AMD layer plot (only positive values) ---
+    ax2.cla()
+    amd_layer = np.array(amd_layer).flatten()
+    #print("AMD Layer:", amd_layer)
+    #amd_layer_pos = np.where(amd_layer > 0, amd_layer, np.nan)  # Mask non-positive values
+    ax2.plot(amd_layer, pres, 'm-')
+    ax2.set_xlim(0, 3)  # Set x-axis to start at 0
+    ax2.set_xlabel("AMD precip [kg/m²]")
+    ax2.set_ylabel("Pressure (bar)")
+    ax2.set_title("AMD in each layer")
+    ax2.invert_yaxis()
+    ax2.grid(True)
+
+     # --- Precipitation rate plot ---
+    ax3.cla()
+    ax3.plot(precip_rate, 'g-')
+    ax3.set_xlabel("Timestep")
+    ax3.set_ylabel("Precipitation Rate (m/s)")
+    ax3.set_title("Precipitation Rate Over Time")
+    ax3.grid(True)
+
+    fig.tight_layout()
+    fig.canvas.draw()
+    plt.pause(0.001)
+
 if __name__ == "__main__":
-    #plot_outputs("outputs_int.txt", 20)  # Change window_size as needed
-    plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "temp")
-    plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xH2SO4aer")
-    plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xS8aer")
-    
+    #plot_outputs("outputs_int.txt", 20, 20)  # Change window_size as needed
+    plot_outputs("outputs_int_wupdate2.txt", 20, 0)  # Change window_size as needed
+    #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "temp")
+    #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xH2SO4aer")
+    #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xS8aer")
+    #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xSO2")
+    #plot_precip_history("outputs_int.txt", 20, 20)
