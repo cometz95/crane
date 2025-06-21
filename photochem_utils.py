@@ -8,6 +8,7 @@ import pandas as pd
 
 from amars_rt import layer2level, Layer2LevelOptions
 from pyharp import (
+    constants,
     calc_dz_hypsometric
 )
 
@@ -37,7 +38,7 @@ def suppress_fortran_output():
             os.close(old_stdout_fd)
             os.close(old_stderr_fd)
 
-def plot_chem_each_timestep(pc):
+def plot_chem_each_timestep(pc, options):
     import matplotlib.pyplot as plt
 
     if not hasattr(plot_chem_each_timestep, "fig"):
@@ -58,10 +59,8 @@ def plot_chem_each_timestep(pc):
     ax3.cla()
 
     sol = pc.mole_fraction_dict()
-    #species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
-    species = ['SO2']
-        # Calculate Brunt-Väisälä frequency
-    N2 = calc_brunt_vaisala_frequency(pc.var.temperature, pc.wrk.pressure/1e6)
+    species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
+    N2 = calc_brunt_vaisala_frequency(pc.var.temperature, pc.wrk.pressure/1e6, options)
 
     # Plot T-P profile
     if hasattr(pc.var, "temperature") and hasattr(pc.wrk, "pressure"):
@@ -86,8 +85,7 @@ def plot_chem_each_timestep(pc):
     ax2.set_yscale('log')
     ax2.invert_yaxis()
     ax2.grid(alpha=0.4)
-    #ax2.set_xlim(1e-20, 1e3)
-    ax2.set_xlim(1e-4, 1e-1)
+    ax2.set_xlim(1e-20, 1e3)
     ax2.set_ylabel('Pressure (bar)')
     ax2.set_xlabel('Mixing ratio')
     ax2.legend(ncol=1, bbox_to_anchor=(1, 1.0), loc='upper left')
@@ -108,6 +106,7 @@ def plot_chem_each_timestep(pc):
     fig.canvas.draw()
     plt.pause(0.001)  # <-- This line allows KeyboardInterrupt to be processed
 
+#this function is for checking to make sure k_cond is keep the vapor pressure of the condensate near the SVP (rh=1)
 def plot_rh_each_timestep(pc, fig, axs):
     axs.cla()
 
@@ -131,8 +130,8 @@ def plot_rh_each_timestep(pc, fig, axs):
     fig.canvas.draw()
     plt.pause(0.001)  # <-- This line allows KeyboardInterrupt to be processed
 
-def config_x_atm_from_photochem(atm, photo_text_filename, pchem_species_dict, harp_species_dict):
-    photo_data = load_atmosphere_file(photo_text_filename)
+def config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict):
+    photo_data = load_atmosphere_file(photo_intermediate_filename)
 
     #interpolate the photochem data to match the number of layers in the harp model
     for pchem_key, harp_key in zip(pchem_species_dict, harp_species_dict):
@@ -147,20 +146,19 @@ def config_x_atm_from_photochem(atm, photo_text_filename, pchem_species_dict, ha
             # Save the interpolated values to atm[harp_key]
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
 
-def run_photochem_onestep(photo_binary_filename, photo_text_filename, atm, dt_photo):
-
-    photo_dens = update_photochem_pt(photo_text_filename, atm)
-    photo_atm_data = load_atmosphere_file(photo_text_filename)
+def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pSurf_CO2):
+    photo_dens = update_photochem_all(photo_intermediate_filename, atm, x_atm_all, options)
+    photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
     photo_pgrid = np.array(photo_atm_data['press'])
 
     pc = EvoAtmosphere(
     'zahnle_amars.yaml',
     'settings.yaml',
     'Sun_3.5Ga_s0_4.txt',
-    photo_text_filename
+    photo_intermediate_filename
     )
 
-    P_CO2 = 0.5 # INPUT A PRESSURE HERE IN BARS
+    P_CO2 = pSurf_CO2 # INPUT A PRESSURE HERE IN BARS
 
     pc.var.verbose = 1
     pc.var.atol = 1e-18
@@ -168,46 +166,9 @@ def run_photochem_onestep(photo_binary_filename, photo_text_filename, atm, dt_ph
     pc.var.upwind_molec_diff = True
 
     # Sets surface 
-    pc.set_lower_bc('CO2',bc_type='press',press=P_CO2*1e6)
+    #pc.set_lower_bc('CO2',bc_type='press',press=P_CO2*1e6)
 
-    pc.update_vertical_grid(TOA_pressure=1e-7*1e6)
-
-    # Change particle free params
-    for i in range(pc.dat.np):
-        pc.var.cond_params[i].smooth_factor = 10 # Bigger numbers help integration converge.
-        pc.var.cond_params[i].k_evap = 1 # Evaporation rate constant
-        pc.var.cond_params[i].k_cond = 10 # Condensation rate constant
-
-    tstart = 0.0
-    #evolve the atmosphere by dt_photo seconds
-    pc.evolve(photo_binary_filename, tstart , pc.wrk.usol, np.array([dt_photo]), overwrite=True)
-
-    return photo_dens, photo_pgrid
-
-def run_photochem_onestep_andplot(photo_binary_filename, photo_text_filename, atm, dt_photo):
-
-    photo_dens = update_photochem_pt(photo_text_filename, atm)
-    photo_atm_data = load_atmosphere_file(photo_text_filename)
-    photo_pgrid = np.array(photo_atm_data['press'])
-
-    pc = EvoAtmosphere(
-    'zahnle_amars.yaml',
-    'settings.yaml',
-    'Sun_3.5Ga.txt',
-    photo_text_filename
-    )
-
-    P_CO2 = 0.5 # INPUT A PRESSURE HERE IN BARS
-
-    pc.var.verbose = 1
-    pc.var.atol = 1e-18
-    pc.var.autodiff = True
-    pc.var.upwind_molec_diff = True
-
-    # Sets surface 
-    pc.set_lower_bc('CO2',bc_type='press',press=P_CO2*1e6)
-
-    pc.update_vertical_grid(TOA_pressure=1e-7*1e6)
+    #pc.update_vertical_grid(TOA_pressure=1e-7*1e6)
 
     # Change particle free params
     for i in range(pc.dat.np):
@@ -220,37 +181,19 @@ def run_photochem_onestep_andplot(photo_binary_filename, photo_text_filename, at
     with suppress_fortran_output():
         pc.evolve(photo_binary_filename, tstart, pc.wrk.usol, np.array([dt_photo]), overwrite=True)
 
-    #plot_chem_each_timestep(pc)
+    #print(pc.var.temperature)
+    print('pc.pres', pc.wrk.pressure/1e6)
+
+    if do_plot:
+        plot_chem_each_timestep(pc, options)
     
-    #need to modify the function argument to pass fig and axs before using the rh plotter
+    #need to modify the enclosing function argument to pass fig and axs before using the below rh plotter
     #plot_rh_each_timestep(pc, fig, axs)
 
     return photo_dens, photo_pgrid
 
-def update_photochem_pt(photo_filename, new_atm):
-    chem_atmosphere_data = load_atmosphere_file(photo_filename)
-    
-    #interpolate the new radiation atmosphere data to match the number of layers in the photochemical model
-
-    new_temp = np.interp(
-        chem_atmosphere_data["press"], 
-        (new_atm["pres"].squeeze().cpu().numpy() / 1e5)[::-1],  # Convert to 1D array and convert Pa to bar
-        new_atm["temp"].squeeze().cpu().numpy()[::-1]        # Convert to 1D array
-    )
-    new_dens = np.array(chem_atmosphere_data["press"])*1e6 / (kb_cgs * new_temp)
-
-    updates = {
-            "temp": new_temp,
-            "den": new_dens
-    }
-
-
-    modify_atmospheric_parameters(chem_atmosphere_data, updates, output_filepath=photo_filename) 
-
-    return new_dens
-
-def update_photochem_all(photo_text_filename, new_atm, x_atm_all):
-    old_chem_atmosphere_data = load_atmosphere_file(photo_text_filename)
+def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, options):
+    old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
     
     # Interpolate the new radiation atmosphere data to match the number of layers in the photochemical model
     new_temp = np.interp(
@@ -260,9 +203,12 @@ def update_photochem_all(photo_text_filename, new_atm, x_atm_all):
     )
     new_dens = np.array(old_chem_atmosphere_data["press"])*1e6 / (kb_cgs * new_temp)
 
+    altitude_profile = calc_altitude_profile(old_chem_atmosphere_data["press"], new_temp, options)
+
     updates = {
         "temp": new_temp,
         "den": new_dens
+        #"alt": altitude_profile
     }
 
     # Directly update all species in x_atm_all (no interpolation needed)
@@ -275,59 +221,18 @@ def update_photochem_all(photo_text_filename, new_atm, x_atm_all):
             else:
                 print(f"Warning: Length mismatch for {key}, skipping update.")
 
-    modify_atmospheric_parameters(old_chem_atmosphere_data, updates, output_filepath=photo_text_filename) 
+    modify_atmospheric_parameters(old_chem_atmosphere_data, updates, output_filepath=photo_intermediate_filename) 
 
     return new_dens
 
-
-def update_harp_input(photo_pgrid, photo_den, photo_binary_filename, new_atm, photo_keys, harp_keys):
-    """
-    Update harp atmospheric parameters based on photochem data.
-
-    Parameters:
-        photo_pgrid (np.ndarray): Pressure grid for the photochem model.
-        photo_binary_filename (str): Path to the photochem binary file.
-        new_atm (dict): Dictionary containing harp atmospheric data.
-        photo_keys (list): List of photochem keys to modify.
-        harp_keys (list): List of harp keys to modify (associated with new_atm).
-
-    Returns:
-        None
-    """
-    # Read the photochem binary file
-    sol = evo_read_evolve_output(photo_binary_filename)
-
-    # Extract the species names and find the indices for the photochem keys
-    species_names = sol['species_names']
-    photo_key_indices = {key: species_names.index(key) for key in photo_keys}
-
-    updates_photo = {}
-
-    for key, index in photo_key_indices.items():
-        usol_values = sol['usol'][index, :, -1]  # Extract the last time step for the species
-        updates_photo[key] = usol_values
-
-    # Interpolate and save updates_photo[photo_key] to new_atm[harp_keys]
-    for photo_key, harp_key in zip(photo_keys, harp_keys):
-        if harp_key in new_atm:
-            # Perform interpolation to match the harp pressure grid
-            interpolated_values = np.interp(
-                new_atm["pres"].squeeze().cpu().numpy(),
-                photo_pgrid[::-1] * 1e5,  # convert Photochem pressure grid to Pa
-                (updates_photo[photo_key]/photo_den)[::-1]  # Photochem values to interpolate
-            )
-
-            # Save the interpolated values to new_atm[harp_key]
-            new_atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)  # Convert to tensor with shape [1, nlyr]
-
-def calc_dxdt(photo_den, photo_binary_filename, photo_text_filename, dt_photo):
+def calc_dxdt(photo_den, photo_binary_filename, photo_intermediate_filename, dt_photo):
     """
     Calculates the dx/dt for all species in the photochem binary file.
     The output dict uses the keys from the header of the loaded atmosphere file.
     """
 
     dxdt_dict = {}
-    old_x_values = load_atmosphere_file(photo_text_filename)
+    old_x_values = load_atmosphere_file(photo_intermediate_filename)
 
     # Read the photochem binary file
     sol = evo_read_evolve_output(photo_binary_filename)
@@ -383,35 +288,6 @@ def load_atmosphere_file(filepath):
 
     return atmosphere_data
 
-def modify_atmosphere_parameter(atmosphere_data, key, new_value, output_filepath):
-
-    if key not in atmosphere_data:
-        print(f"Error: Key '{key}' not found in atmosphere data.")
-        return
-
-    # Replace the data for the given key with the new value
-    num_layers = len(atmosphere_data[key])
-    if len(new_value) == num_layers:
-        atmosphere_data[key] = new_value
-    else:
-        print(f"Error: New value length ({len(new_value)}) does not match number of layers ({num_layers}).")
-        return
-
-    # Save the updated data to a file
-    try:
-        with open(output_filepath, 'w') as file:
-            # Write the headers
-            headers = " ".join(atmosphere_data.keys())
-            file.write(headers + "\n")
-
-            # Write the data rows
-            for i in range(num_layers):
-                row = " ".join(f"{atmosphere_data[key][i]:.8E}" for key in atmosphere_data)
-                file.write(row + "\n")
-
-    except Exception as e:
-        print(f"Error saving modified atmosphere file: {e}")
-
 def modify_atmospheric_parameters(atmosphere_data, updates, output_filepath):
     """
     Modify multiple parameters in the atmosphere data and save the updated data to a file.
@@ -456,25 +332,52 @@ def modify_atmospheric_parameters(atmosphere_data, updates, output_filepath):
     except Exception as e:
         print(f"Error saving modified atmosphere file: {e}")
 
-def setup_presure_grid(nlyr, pbot, ptop):
-    """
-    Set up a pressure grid for the atmosphere.
+#input pressure is in bars
+def calc_altitude_profile(pres, temp, options):
+    pres_t = torch.tensor(pres) * 1e5       #assume pressure is in bars, and it needs to go to Pa
+    temp_t = torch.tensor(temp)
+    dz_btwn_levels = calc_dz_hypsometric(
+        pres_t, temp_t, torch.tensor(options.mean_mol_weight * options.grav / constants.Rgas)
+    )
+    l2l = Layer2LevelOptions(order = k2ndOrder)
+    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) #interpolate the normal dz, which is dist between levels, so that we have the distance between layer centers
 
-    Parameters:
-        nlyr (int): Number of layers.
-        pbot (float): Bottom pressure in Pa.
-        ptop (float): Top pressure in Pa.
+    dz_btwn_layers = dz_btwn_layers.numpy()[1:-1]
+    alt_first_layer = (dz_btwn_levels[0].item()/2)
+    altitude_profile = np.concatenate(([alt_first_layer], np.cumsum(dz_btwn_layers)))/1000      #result is in km
 
-    Returns:
-        np.ndarray: Pressure grid.
-    """
+    return altitude_profile
+
+#this function is used to modify photochem's pressure grid, during initial model setup
+def setup_presure_grid_init_temp(photo_init_filename, options, pbot, ptop, init_btemp, init_ttemp):
+    old_chem_atmosphere_data = load_atmosphere_file(photo_init_filename)
+    nlyr = len(old_chem_atmosphere_data["press"])
+
     pres = np.logspace(np.log10(pbot), np.log10(ptop), nlyr)
-    print(pres)
+    temp = np.linspace(init_btemp, init_ttemp, nlyr)
+    dens = pres * 1e6 / (kb_cgs * temp) #convert pressure in bars to dynes/cm^2
+
+    altitude_profile = calc_altitude_profile(pres, temp, options)
+
+    updates = {
+        "press": pres,
+        "temp": temp,
+        "den": dens,
+        "alt": altitude_profile
+    }
+    modify_atmospheric_parameters(old_chem_atmosphere_data, updates, photo_init_filename)
+
+#this function is used to modify photochem's pressure grid, during initial model setup
+def setup_presure_grid_init_temp2(photo_init_filename, options, pbot, ptop, init_btemp, init_ttemp):
+    old_chem_atmosphere_data = load_atmosphere_file(photo_init_filename)
+    nlyr = len(old_chem_atmosphere_data["press"])
+
+    pres = np.logspace(np.log10(pbot), np.log10(ptop), nlyr)
 
     updates = {
         "press": pres,
     }
-    modify_atmospheric_parameters(atmosphere_data, updates, output_filepath='atmosphere_init.txt')
+    modify_atmospheric_parameters(old_chem_atmosphere_data, updates, photo_init_filename)
 
 def calc_potential_temperature(temperature, pressure):
     Rd = 8.314 / 0.044
@@ -483,33 +386,33 @@ def calc_potential_temperature(temperature, pressure):
     theta = temperature * (p0 / pressure) ** (Rd / cp)
     return theta
 
-def calc_brunt_vaisala_frequency(temperature, pressure):
-    g = 3.73  # Gravitational acceleration [m/s^2]
+def calc_brunt_vaisala_frequency(temperature, pressure, options):
+    g = options.grav
     theta = calc_potential_temperature(temperature, pressure)
-    Rd = 8.314 / 0.044
+    Rd = constants.Rgas / options.mean_mol_weight
     
     pressure_t = torch.tensor(pressure, dtype=torch.float64).unsqueeze(0)
     temperature_t = torch.tensor(temperature, dtype=torch.float64).unsqueeze(0)
     g_ov_R = torch.full_like(pressure_t, g / Rd)
 
     dz = calc_dz_hypsometric(pressure_t, temperature_t, g_ov_R)
-    options = Layer2LevelOptions(order=k2ndOrder)
+    l2l = Layer2LevelOptions(order=k2ndOrder)
     theta = torch.tensor(theta, dtype=torch.float64).unsqueeze(0)
-    theta_levels = layer2level(dz, theta, options)
+    theta_levels = layer2level(dz, theta, l2l)
     dtheta = theta_levels[..., 1:] - theta_levels[..., :-1]
 
 
     N2 = (g / theta) * dtheta / dz
     return N2
 
-def plot_atmosphere_file(filepath, plot_outname):
+def plot_atmosphere_file(filepath, plot_outname, options):
     # Load data
     atmo_data = load_atmosphere_file(filepath)
     pressures = np.array(atmo_data["press"]) * 1e5  # bar to Pa
     temperatures = np.array(atmo_data["temp"])
 
     # Calculate Brunt-Väisälä frequency
-    N2 = calc_brunt_vaisala_frequency(temperatures, pressures)
+    N2 = calc_brunt_vaisala_frequency(temperatures, pressures, options)
 
     # Choose species to plot (edit as needed)
     species = ['S8','S8aer','SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
@@ -574,9 +477,10 @@ def plot_atmosphere_file(filepath, plot_outname):
     fig.tight_layout()
     plt.savefig(plot_outname, dpi=150, bbox_inches='tight')
 
+#useful for debugging, believe it or not
 def test_whats_going_on(photo_binary_filename, photo_keys):
     sol = evo_read_evolve_output(photo_binary_filename)
-    print(sol)
+    #print(sol)
 
     # Extract the species names and find the indices for the photochem keys
     species_names = sol['species_names']
@@ -601,6 +505,13 @@ if __name__ == "__main__":
 
     #file_to_plot = 'atmosphere_intermediate.txt'
     #plot_outname = 'atmosphere_int.png'
-    #plot_atmosphere_file('atmosphere_intermediate.txt', plot_outname)
-    pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
-    test_whats_going_on('atmosphere_intermediate.bin', pchem_species_dict)
+    #plot_atmosphere_file('atmosphere_intermediate.txt', plot_outname, options)
+    #pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
+    #pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
+    #test_whats_going_on('atmosphere_intermediate.bin', pchem_species_dict)
+    #test_whats_going_on('atmosphere_intermediate_aeroscale0.1_radius0.1um.bin', pchem_species_dict)
+    data = load_atmosphere_file('atmosphere_intermediate_aeroscale0.1_radius0.1um.txt')
+    plt.plot(data["temp"],data["press"])
+    plt.gca().invert_yaxis()
+    plt.yscale("log")
+    plt.show()

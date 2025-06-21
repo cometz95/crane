@@ -1,15 +1,15 @@
 
 atmosphere-grid:
   bottom: 0.0 # cm
-  top: atmospherefile # cm
+  top: 1.0e7 # cm
   number-of-layers: 100
 
 planet:
   planet-mass: 6.417e26 # grams
   planet-radius: 3.396e8 # cm. Radius to bottom of atmosphere-grid
-  surface-albedo: 0.25 # cm
+  surface-albedo: 0.3 # cm
   # photon-scale-factor: 1.0 # Optional. Scales the stellar flux for diff planets in the same system
-  solar-zenith-angle: 48.0 # degrees
+  solar-zenith-angle: 0.0 # degrees
   hydrogen-escape:
     type: diffusion limited
   water:
@@ -50,7 +50,7 @@ boundary-conditions:
   lower-boundary: {type: press, press: 0.11}
   upper-boundary: {type: veff, veff: 0.0}
 - name: HCl
-  lower-boundary: {type: press, press: 25e-3}
+  lower-boundary: {type: press, press: 2.5e-4}
   upper-boundary: {type: veff, veff: 0.0}
 - name: O1D
   type: short lived

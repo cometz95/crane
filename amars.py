@@ -1,31 +1,17 @@
-import torch
-import pyharp
-import time
-import numpy as np
-from torch import zeros, tensor
+import matplotlib.pyplot as plt
 import shutil
 import pandas as pd
 import copy
 
-from crane_functions import RadiationModelOptions, init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
-from amars_rt import calc_amars_rt, calc_dTdt
-from photochem_utils import update_photochem_all, calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file
-
-from photochem import EvoAtmosphere
-
-k2ndOrder = 2
-k4thOrder = 4
-kExtrapolate = 0
-kConstant = 1
+from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment, set_pgrid_from_file
+from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt
+from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, setup_presure_grid_init_temp2
 
 if __name__ == "__main__":
-    nstr = 4
-    pbot, ptop = 0.7e5, 100.0
-    atm_temp_init = 200.0
-
     options = RadiationModelOptions(
         ncol=1,
         nlyr=80,
+        nstr = 4,
         grav=3.711,  # Gravitational acceleration on Mars
         mean_mol_weight=0.044,  # Mean molecular weight of CO2 (kg/mol)
         cp=844,  # Specific heat capacity of CO2 (J/(kg K))
@@ -34,60 +20,78 @@ if __name__ == "__main__":
         kappa=2.0e-2,  # Thermal diffusivity (m^2/s)
         surf_sw_albedo = 0.3,
         sr_sun = 2.92842e-5,
-        btemp0 = 222.871,
-        ttemp0 = 100,
+        btemp0 = 240,
+        ttemp0 = 140,
         solar_temp = 5772,
-        lum_scale = 0.7/4,
+        lum_scale = 0.7/4, #adjust by 0.7 for age of the sun, and 1/4 for global average
         nspecies = 5,
         coszen = 1,
         nswbin = 200 
     )
-
-    #temp, pres, xfrac, atm = init_atm_isothermal(200, options.ncol, options.nlyr, pbot, ptop, options)
+    pbot = 0.52 #total surface pressure in bars
+    ptop = 1e-7 #ptop at the TOA in bars
+    pSurf_CO2 = 0.5 #partial pressure of CO2 at the surface, in bars
+    #surface pressures of other gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
 
     shared = {}
+    do_plot = True #if True, plots the atmosphere at each timestep
 
-    # Time step in seconds
-
-    #for now, dt_rad and dt_photo must be multiples of dt_dyn
-    dt_dyn = 86400.0/4
+    #for now, make the timesteps all equal
+    # otherwise, the code is setup so that dt_rad and dt_photo must be multiples of dt_dyn
+    dt_dyn = 86400.0/4      #seconds
     dt_rad = dt_dyn
     dt_photo = dt_dyn
-    t_lim = dt_dyn*4*365*20
+    t_lim = dt_dyn*4*365*5     #length of time to run the model for, in seconds
     writeout_step = 1
+
+    #names of species we are about for RT and condensation, length must match options.nspecies
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
     condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
     condensate_harp_key = 'xSO2'
-    photo_init_filename = 'atmosphere_init_stable.txt'
-    photo_text_filename = 'atmosphere_intermediate_stable.txt'
-    photo_binary_filename = 'atmosphere_intermediate_stable.bin'
-    shutil.copy(photo_init_filename, photo_text_filename)
+
+    #io file names
+    case_name = 'aeroscale0.1_radius0.1um'
+    init_xfrac_filebase = 'atmosphere_init_stable.txt'
+
+    photo_init_filename = 'atmosphere_init' + f'_{case_name}' + '.txt'
+    #photo_init_filename = 'atmosphere_init_stable.txt'
+    intermediate_filename = 'atmosphere_intermediate' + f'_{case_name}'
+    photo_intermediate_filename = intermediate_filename + '.txt'
+    photo_binary_filename = intermediate_filename + '.bin'
+    final_photo_state_filename = f'atmosphere_final_{case_name}.txt'
+    outputs_intermediate_name = f'outputs_intermediate_{case_name}.txt'
+    outputs_final_name = f'outputs_final_{case_name}.txt'
+    final_plot_name = f'atmosphere_plot_final_{case_name}.png'
+
+    shutil.copy(init_xfrac_filebase, photo_init_filename)
     outputs = {
         "tot_time": [],
         "surface_temp": [],
         "precip_rate": [],
         "atm": []
     }
-
-    # Load the initial atmosphere from the photochem file
-    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_text_filename, options)
-
+    #the pressure grid is fixed in our model, and is specified in the photochem file, but must be set here manually for each run
+    #right now, choosing to setup initial atmosphere so that temperature falls of by the same amount in each layer, from btemp0 to ttemp0
+    #setup_presure_grid_init_temp(photo_init_filename, options, pbot, ptop, options.btemp0, options.ttemp0)
+    #setup_presure_grid_init_temp2(photo_init_filename, options, pbot, ptop, options.btemp0, options.ttemp0)
+    shutil.copy(photo_init_filename, photo_intermediate_filename)
+    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, pbot, ptop) # Load the initial atmosphere from the photochem file
     #config and init rates
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(photo_binary_filename, photo_text_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pSurf_CO2)
 
     step = 0
     tot_time = 0.0
 
-    import matplotlib.pyplot as plt
-    plt.ion()
-    fig, axs = plt.subplots(1, 3, figsize=(12, 4), dpi=100)
-    precip_rate_list = []
+    #plt.ion()
+    #fig, axs = plt.subplots(1, 3, figsize=(12, 4), dpi=100)
+    #precip_rate_list = []
 
     while tot_time < t_lim:
+        #each step proceeds in this order:
         #call radiation, do heating
-        #call photochem, update mixing ratios (initial condensate before conv adj is at the hotter temperature)
-        #then do convective adjustment, and cool the atmosphere
+        #call photochem, update mixing ratios (setting initial condensate mixing ratio before convective adjustment)
+        #then do convective adjustment, and calc precip due to cooling
         if step % int(dt_rad // dt_dyn) == 0:
             netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options)
             dTdt_atm, dTdt_surf = calc_dTdt(
@@ -97,25 +101,23 @@ if __name__ == "__main__":
                 bc=bc,
                 options=options,
                 shared=shared)
-            
+
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn)
-        atm_before = copy.deepcopy(atm)
+        #atm_before_convadj = copy.deepcopy(atm)
 
         if step % int(dt_photo // dt_dyn) == 0:
-            update_photochem_all(photo_text_filename, atm, x_atm_all)
-            photo_dens, photo_pgrid = run_photochem_onestep_andplot(photo_binary_filename, photo_text_filename, atm, dt_photo)
+            photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pSurf_CO2)
             dxdt_dict = calc_dxdt(
                 photo_dens,
                 photo_binary_filename,
-                photo_text_filename,
+                photo_intermediate_filename,
                 dt_photo
             )
         x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_pgrid)
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
-        atm_after = copy.deepcopy(atm)
-
-        precip_rate_list.append(precip_rate)
-        #plot_convective_adjustment(atm_before, atm_after, precip_rate_list, amd_layer, fig, axs)
+        #atm_after_convadj = copy.deepcopy(atm)
+        #precip_rate_list.append(precip_rate)
+        #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs)
         
         if step % writeout_step == 0:
             outputs["tot_time"].append(tot_time)
@@ -123,15 +125,16 @@ if __name__ == "__main__":
             outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
             outputs["atm"].append(copy.deepcopy(atm))
             df = pd.DataFrame(outputs)
-            df.to_csv("outputs_int_wupdate2.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
+            df.to_csv(outputs_intermediate_name, index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
 
         tot_time += dt_dyn
         step += 1
         #print(step)
-        print('precip rate: ',precip_rate)
+        #print('precip rate: ',precip_rate)
 
+
+    # Final output
     df = pd.DataFrame(outputs)
-    df.to_csv("outputs_final_stable.txt", index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
-    name_finaloutput = f'atmosphere_final_{tot_time:.0f}.txt'
-    shutil.copy(photo_text_filename, name_finaloutput)
-    plot_atmosphere_file(name_finaloutput, 'atmosphere_final.png')
+    df.to_csv(outputs_final_name, index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
+    shutil.copy(photo_intermediate_filename, final_photo_state_filename)
+    plot_atmosphere_file(final_photo_state_filename, final_plot_name, options)

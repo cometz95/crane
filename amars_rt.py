@@ -1,17 +1,14 @@
 #! /user/bin/env python3
 import torch
 import numpy as np
-import pyharp as harp
-from torch import tensor, logspace, zeros, ones
+from torch import tensor, zeros, ones
 from pyharp import (
-    interpn,
     constants,
     calc_dz_hypsometric,
     bbflux_wavenumber,
     RadiationOptions,
     Radiation,
     disort_config,
-    read_rfm_atm,
 )
 
 stefanBoltzmannConst = 5.67e-8  # Stefan-Boltzmann constant (W/(m^2 K^4))
@@ -21,83 +18,32 @@ k4thOrder = 4
 kExtrapolate = 0
 kConstant = 1
 
-def config_amars_rt_from_rfm(pres, temp, options, nstr=4):
-    ncol, nlyr = pres.shape
-
-    pres1 = pres.mean(0)
-
-    # mole fractions
-    xfrac = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
-
-    # molecules
-    rfm_atm = read_rfm_atm("rfm.atm")
-    rfm_pre = rfm_atm["PRE"] * 100.0
-    rfm_tem = rfm_atm["TEM"]
-
-    xfrac[:, :, 0] = interpn(
-        [pres.log()], [rfm_pre.log()], rfm_atm["CO2"].unsqueeze(-1) * 1.0e-6
-    ).squeeze(-1)
-    xfrac[:, :, 1] = interpn(
-        [pres.log()], [rfm_pre.log()], rfm_atm["H2O"].unsqueeze(-1) * 1.0e-6
-    ).squeeze(-1)
-    xfrac[:, :, 2] = interpn(
-        [pres.log()], [rfm_pre.log()], rfm_atm["SO2"].unsqueeze(-1) * 1.0e-6
-    ).squeeze(-1)
-
-    # aerosols
-    aero_ptx = tensor(np.genfromtxt("aerosol_output_data.txt"))
-    aero_p = aero_ptx[:, 0] * 1.0e5
-    aero_t = aero_ptx[:, 1]
-    aero_x = aero_ptx[:, 2:]
-
-    xfrac[:, :, 3:] = interpn([pres.log()], [aero_p.log()], aero_x)
-    atm = {"pres": pres, "temp": temp, "xCO2": xfrac[:, :, 0], "xH2O": xfrac[:, :, 1], "xSO2": xfrac[:, :, 2], "xH2SO4aer": xfrac[:, :, 3], "xS8aer": xfrac[:, :, 4]}
-    bc = {}
-
-    # layer thickness
-    dz = calc_dz_hypsometric(
-        pres, temp, tensor(options.mean_mol_weight * options.grav / constants.Rgas)
-    )
-
-    rad_op = RadiationOptions.from_yaml("amars-ck.yaml")
-
-    # configure bands
-    for name, band in rad_op.bands().items():
-        band.ww(band.query_weights())
-        nwave = len(band.ww()) if name != "SW" else options.nswbin
-
-        wmin = band.disort().wave_lower()[0]
-        wmax = band.disort().wave_upper()[0]
-
-        band.disort().accur(1.0e-12)
-        disort_config(band.disort(), nstr, nlyr, ncol, nwave)
-
-        if name == "SW":  # shortwave
-            band.ww(np.linspace(wmin, wmax, nwave))
-            wave = tensor(band.ww(), dtype=torch.float64)
-            bc[name + "/fbeam"] = (
-                options.lum_scale * options.sr_sun * bbflux_wavenumber(wave, options.solar_temp)
-            ).expand(nwave, ncol)
-            bc[name + "/albedo"] = options.surf_sw_albedo * ones(
-                (nwave, ncol), dtype=torch.float64
-            )
-            bc[name + "/umu0"] = options.coszen * ones((ncol,), dtype=torch.float64)
-        else:  # longwave
-            band.disort().wave_lower([wmin] * nwave)
-            band.disort().wave_upper([wmax] * nwave)
-            bc[name + "/albedo"] = zeros((nwave, ncol), dtype=torch.float64)
-            bc[name + "/temis"] = ones((nwave, ncol), dtype=torch.float64)
-
-    bc["btemp"] = options.btemp0 * ones((ncol,), dtype=torch.float64)
-    bc["ttemp"] = options.ttemp0 * ones((ncol,), dtype=torch.float64)
-
-    # construct radiation model
-    # print("radiation options:\n", rad_op)
-    rad = Radiation(rad_op)
-    return rad, xfrac, atm, bc, dz
+class RadiationModelOptions:
+    def __init__(self, ncol, nlyr, nstr, grav, mean_mol_weight, cp, aerosol_scale_factor, cSurf, kappa, 
+                 surf_sw_albedo, sr_sun, btemp0, ttemp0, solar_temp,
+                 lum_scale, nspecies, coszen, nswbin):
+        self.ncol = ncol  # Number of columns
+        self.nlyr = nlyr  # Number of layers
+        self.nstr = nstr
+        self.grav = grav  # Gravitational acceleration (m/s^2)
+        self.mean_mol_weight = mean_mol_weight  # Mean molecular weight (kg/mol)
+        self.cp = cp  # Specific heat capacity (J/(kg K))
+        self.aerosol_scale_factor = aerosol_scale_factor  # Aerosol scaling factor
+        self.cSurf = cSurf  # Surface thermal inertia (J/(m^2 K))
+        self.kappa = kappa  # Thermal diffusivity (m^2/s)
+        self.intg = {"type": "rk2"}  # Integration options (e.g., Runge-Kutta 2nd order)
+        self.surf_sw_albedo = surf_sw_albedo  # Surface shortwave albedo
+        self.sr_sun = sr_sun
+        self.btemp0 = btemp0
+        self.ttemp0 = ttemp0
+        self.solar_temp = solar_temp
+        self.lum_scale = lum_scale  # Luminosity scaling factor
+        self.nspecies = nspecies
+        self.coszen = coszen
+        self.nswbin = nswbin
 
 
-def config_amars_rt_init(pres, options, nstr=4):
+def config_amars_rt_init(pres, options):
     ncol, nlyr = pres.shape
     bc = {}
 
@@ -105,6 +51,7 @@ def config_amars_rt_init(pres, options, nstr=4):
 
     # configure bands
     for name, band in rad_op.bands().items():
+        #if multiple absorbers in each band, need to pass the name of which one you want, otherwise just use the next one
         #absorber_names = list(band.opacities().keys())
         #band.ww(band.query_weights(absorber_names[0]))
         band.ww(band.query_weights())
@@ -114,7 +61,7 @@ def config_amars_rt_init(pres, options, nstr=4):
         wmax = band.disort().wave_upper()[0]
 
         band.disort().accur(1.0e-12)
-        disort_config(band.disort(), nstr, nlyr, ncol, nwave)
+        disort_config(band.disort(), options.nstr, nlyr, ncol, nwave)
 
         if name == "SW":  # shortwave
             band.ww(np.linspace(wmin, wmax, nwave))
@@ -140,26 +87,6 @@ def config_amars_rt_init(pres, options, nstr=4):
     rad = Radiation(rad_op)
     return rad, bc
 
-
-def update_amars_rt(atm, options, nstr=4):
-    dz = calc_dz_hypsometric(
-        atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas)
-    )
-
-
-def calc_amars_rt_old(rad, xfrac, pres, temp, atm, bc):
-    # run RT
-    conc = xfrac.clone()
-    # conc *= atm["pres"].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
-    conc *= pres.unsqueeze(-1) / (constants.Rgas * temp.unsqueeze(-1))
-    netflux = rad.forward(conc, dz, bc, atm)
-
-    downward_flux = harp.shared()["radiation/downward_flux"]
-    upward_flux = harp.shared()["radiation/upward_flux"]
-
-    return netflux, downward_flux, upward_flux
-
-
 def calc_amars_rt(rad, atm, bc, options):
     dz = calc_dz_hypsometric(
         atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas)
@@ -181,7 +108,6 @@ def calc_amars_rt(rad, atm, bc, options):
 
 def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
 
-    # Calculate layer thickness (dz)
     dz = calc_dz_hypsometric(
         atm["pres"],
         atm["temp"],
@@ -214,7 +140,6 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
 
     # Density at levels
     l2l = Layer2LevelOptions(order=k2ndOrder)
-    #l2l.order.lower(kExtrapolate).upper(kConstant)
     rhoh = layer2level(dz, rho.log(), l2l).exp()
 
     # Thermal diffusion flux
@@ -232,6 +157,7 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
 
     return dTdt_atm, dTdt_surf
 
+#our model is tracked on layers, so we need a way to find interpolate onto levels (in between the layers)
 class Layer2LevelOptions:
     def __init__(self, order, lower=kExtrapolate, upper=kConstant, check_positivity=False):
         self.order = order  # Interpolation order (2nd or 4th)
