@@ -56,8 +56,6 @@ def calc_dp_hypsometric_fromtop(alt, temp, g_ov_R, ptop):
     
     #print(alt_levels)
     p = np.exp(lnp)
-    print(lnp)
-    print(p)
 
 #pbot in bar
 #g_ov_R is same length as alt, but gets trimmed by 1
@@ -103,7 +101,7 @@ def plot_chem_each_timestep(pc, options):
 
     sol = pc.mole_fraction_dict()
     species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
-    N2 = calc_brunt_vaisala_frequency(pc.var.temperature, pc.wrk.pressure/1e6, options)
+    N2 = calc_brunt_vaisala_frequency(pc.var.temperature, pc.wrk.pressure/10, options)
 
     # Plot T-P profile
     if hasattr(pc.var, "temperature") and hasattr(pc.wrk, "pressure"):
@@ -136,7 +134,8 @@ def plot_chem_each_timestep(pc, options):
     ax2.text(0.02, 1.04, f't = {pc.wrk.tn:.2e} s', size=15, ha='left', va='bottom', transform=ax2.transAxes)
 
         # --- Brunt-Väisälä Frequency ---
-    ax3.plot(N2.squeeze()*1e4, pc.wrk.pressure, color='k')
+    print(pc.wrk.pressure)
+    ax3.plot(N2.squeeze()*1e4, pc.wrk.pressure/1e6, color='k')
     ax3.axvline(x=0, color='r', linestyle='--')
     ax3.set_xlabel('1e4 * Brunt-Väisälä Frequency (N²) [s⁻²]')
     ax3.set_ylabel('Pressure (bar)')
@@ -239,7 +238,7 @@ def run_photochem_onestep_andplot_save(x_atm_all, options, photo_binary_filename
 def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot):
     photo_dens = update_photochem_all(photo_intermediate_filename, atm, x_atm_all, options, pbot)
     photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
-    photo_pgrid = np.array(photo_atm_data['press'])
+    photo_alt_grid = photo_atm_data["alt"]
 
     pc = EvoAtmosphere(
     'zahnle_amars.yaml',
@@ -273,7 +272,7 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
 
     #pc.out2atmosphere_txt(photo_intermediate_filename, overwrite=True)
     #print(pc.var.temperature)
-    print('pc.pres', pc.wrk.pressure/1e6)
+    #print('pc.pres', pc.wrk.pressure/1e6)
 
     if do_plot:
         plot_chem_each_timestep(pc, options)
@@ -281,7 +280,7 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
     #need to modify the enclosing function argument to pass fig and axs before using the below rh plotter
     #plot_rh_each_timestep(pc, fig, axs)
 
-    return photo_dens, photo_pgrid
+    return photo_dens, photo_alt_grid
 
 def make_atmosphere_z_grid_from_yaml(yaml_path):
     # Load YAML
@@ -368,7 +367,6 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, option
     )
     g_ov_R = torch.ones(len(new_temp)) * (options.mean_mol_weight * options.grav / constants.Rgas)
     p = calc_p_hypsometric(old_chem_atmosphere_data['alt'], new_temp, g_ov_R, pbot)
-    print('print p', p)
     new_dens = np.array(p)*10 / (kb_cgs * new_temp)
 
     updates = {

@@ -9,7 +9,7 @@ import re
 import pandas as pd
 
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions
-from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, config_x_atm_from_photochem, load_atmosphere_file
+from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
 
 Rgas_SI = 8.314462618  # J/(mol K)
 k2ndOrder = 2
@@ -251,7 +251,7 @@ def load_particle_info(particle_name, yaml_filename):
     return SpeciesInfo(particle, data.get('species', []))
 
 def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pbot):
-    photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
+    photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
     rad, bc = config_amars_rt_init(atm["pres"], options)
 
@@ -275,7 +275,7 @@ def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filen
 
     return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc
 
-def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_pgrid):
+def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_alt_grid, options):
 
     # 1. Update all mixing ratios in x_atm_all
     for key in x_atm_all:
@@ -283,13 +283,15 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
             x_atm_all[key] += dxdt_dict[key] * dt_dyn
             # Ensure non-negative
             x_atm_all[key] = torch.clamp(x_atm_all[key], min=1e-40)
+    
+    atm_alt = calc_altitude_profile(atm["pres"], atm["temp"], options)
 
     for photo_key, harp_key in zip(photo_keys, harp_keys):
         if photo_key in x_atm_all and harp_key in atm:
             interpolated_values = np.interp(
-                atm["pres"].squeeze().cpu().numpy(),
-                photo_pgrid[::-1] * 1e5,  # convert Photochem pressure grid to Pa
-                (x_atm_all[photo_key].squeeze().cpu().numpy())[::-1] 
+                atm_alt,
+                photo_alt_grid,
+                x_atm_all[photo_key].squeeze().cpu().numpy()
             )
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)  # shape [1, nlyr]
         else:

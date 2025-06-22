@@ -103,14 +103,14 @@ if __name__ == "__main__":
         #atm_before_convadj = copy.deepcopy(atm)
 
         if step % int(dt_photo // dt_dyn) == 0:
-            photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
+            photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
             dxdt_dict = calc_dxdt(
                 photo_dens,
                 photo_binary_filename,
                 photo_intermediate_filename,
                 dt_photo
             )
-        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_pgrid)
+        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_alt_grid, options)
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
         #atm_after_convadj = copy.deepcopy(atm)
         #precip_rate_list.append(precip_rate)
