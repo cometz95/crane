@@ -5,6 +5,7 @@ atmosphere-grid:
   number-of-layers: 100
 
 planet:
+  #P_surf: 0.5 #bars
   planet-mass: 6.417e26 # grams
   planet-radius: 3.396e8 # cm. Radius to bottom of atmosphere-grid
   surface-albedo: 0.3 # cm

@@ -250,8 +250,8 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pSurf_CO2):
-    photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pSurf_CO2)
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pbot):
+    photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
     rad, bc = config_amars_rt_init(atm["pres"], options)
 
@@ -318,7 +318,6 @@ def init_atm_isothermal(atm_temp_init, ncol, nlyr, pbot, ptop, options):
 
     return temp, pres, xfrac, atm
 
-
 def init_from_file(photo_filename, options, pbot, ptop):
     """
     Initialize atmospheric state from a photochem file.
@@ -335,8 +334,8 @@ def init_from_file(photo_filename, options, pbot, ptop):
     file_temp = np.array(chem_atmosphere_data["temp"])   # in K
 
     # Create harp model pressure grid (in Pa)
-    #pres = torch.logspace(np.log10(file_pres[0]*1e5), np.log10(file_pres[-1]*1e5), options.nlyr, dtype=torch.float64)
-    pres = torch.logspace(np.log10(pbot*1e5), np.log10(ptop*1e5), options.nlyr, dtype=torch.float64)
+    pres = torch.logspace(np.log10(file_pres[0]*1e5), np.log10(file_pres[-1]*1e5), options.nlyr, dtype=torch.float64)
+    #pres = torch.logspace(np.log10(pbot*1e5), np.log10(ptop*1e5), options.nlyr, dtype=torch.float64)
     pres = pres.unsqueeze(0).expand(options.ncol, -1).contiguous()
 
     # Interpolate temperature onto model grid (convert pres to bar for interpolation)

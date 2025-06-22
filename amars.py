@@ -5,7 +5,7 @@ import copy
 
 from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment, set_pgrid_from_file
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt
-from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, setup_presure_grid_init_temp2
+from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, setup_presure_grid_init_temp2, update_photochem_alt_only
 
 if __name__ == "__main__":
     options = RadiationModelOptions(
@@ -28,7 +28,7 @@ if __name__ == "__main__":
         coszen = 1,
         nswbin = 200 
     )
-    pbot = 0.52 #total surface pressure in bars
+    pbot = 0.53 #total surface pressure in bars
     ptop = 1e-7 #ptop at the TOA in bars
     pSurf_CO2 = 0.5 #partial pressure of CO2 at the surface, in bars
     #surface pressures of other gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     dt_dyn = 86400.0/4      #seconds
     dt_rad = dt_dyn
     dt_photo = dt_dyn
-    t_lim = dt_dyn*4*365*5     #length of time to run the model for, in seconds
+    t_lim = dt_dyn*500     #length of time to run the model for, in seconds
     writeout_step = 1
 
     #names of species we are about for RT and condensation, length must match options.nspecies
@@ -71,14 +71,11 @@ if __name__ == "__main__":
         "precip_rate": [],
         "atm": []
     }
-    #the pressure grid is fixed in our model, and is specified in the photochem file, but must be set here manually for each run
-    #right now, choosing to setup initial atmosphere so that temperature falls of by the same amount in each layer, from btemp0 to ttemp0
-    #setup_presure_grid_init_temp(photo_init_filename, options, pbot, ptop, options.btemp0, options.ttemp0)
-    #setup_presure_grid_init_temp2(photo_init_filename, options, pbot, ptop, options.btemp0, options.ttemp0)
+
     shutil.copy(photo_init_filename, photo_intermediate_filename)
+    update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml')
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, pbot, ptop) # Load the initial atmosphere from the photochem file
-    #config and init rates
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pSurf_CO2)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pbot)
 
     step = 0
     tot_time = 0.0
@@ -106,7 +103,7 @@ if __name__ == "__main__":
         #atm_before_convadj = copy.deepcopy(atm)
 
         if step % int(dt_photo // dt_dyn) == 0:
-            photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pSurf_CO2)
+            photo_dens, photo_pgrid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
             dxdt_dict = calc_dxdt(
                 photo_dens,
                 photo_binary_filename,

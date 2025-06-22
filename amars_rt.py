@@ -159,7 +159,7 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
 
 #our model is tracked on layers, so we need a way to find interpolate onto levels (in between the layers)
 class Layer2LevelOptions:
-    def __init__(self, order, lower=kExtrapolate, upper=kConstant, check_positivity=False):
+    def __init__(self, order, lower=kExtrapolate, upper=kExtrapolate, check_positivity=False):
         self.order = order  # Interpolation order (2nd or 4th)
         self.lower = lower  # Lower boundary condition (extrapolate or constant)
         self.upper = upper  # Upper boundary condition (extrapolate or constant)
@@ -252,5 +252,62 @@ def layer2level(dx, var, options):
             error_indices = torch.nonzero(out < 0, as_tuple=True)
             print(f"Negative values found at cell interface: indices = {error_indices}")
             raise ValueError("layer2level check failed: negative values found")
+
+    return out
+
+
+def layer2level_1var(var, options):
+    # increase the last dimension by 1 (lyr -> lvl)
+    shape = list(var.size())
+    shape[-1] += 1
+    out = torch.zeros(shape, dtype=var.dtype, device=var.device)
+
+    nlyr = var.size(-1)
+
+    # Lower boundary
+    if nlyr == 1:
+        out[..., 0] = var[..., 0]
+    else:
+        if options.lower == kExtrapolate:
+            out[..., 0] = (3. * var[..., 0] - var[..., 1]) / 2.
+        elif options.lower == kConstant:
+            out[..., 0] = var[..., 0]
+        else:
+            raise ValueError("Unsupported lower boundary condition")
+
+    # Interior
+    if options.order == k4thOrder:
+        # 4th order not implemented here; fallback to 2nd order for demonstration
+        # You would need to implement Center4Interp if you want 4th order
+        if nlyr > 1:
+            out[..., 1] = (var[..., 0] + var[..., 1]) / 2.
+        if nlyr > 2:
+            out[..., nlyr - 1] = (var[..., nlyr - 1] + var[..., nlyr - 2]) / 2.
+        if nlyr > 3:
+            # Placeholder: implement 4th order interpolation here if needed
+            out[..., 2:nlyr-1] = (var[..., 1:nlyr-2] + var[..., 2:nlyr-1]) / 2.
+    elif options.order == k2ndOrder:
+        if nlyr > 1:
+            out[..., 1:nlyr] = (var[..., 0:nlyr-1] + var[..., 1:nlyr]) / 2.
+    else:
+        raise ValueError("Unsupported interpolation order")
+
+    # Upper boundary
+    if nlyr == 1:
+        out[..., nlyr] = var[..., nlyr - 1]
+    else:
+        if options.upper == kExtrapolate:
+            out[..., nlyr] = (3. * var[..., nlyr - 1] - var[..., nlyr - 2]) / 2.
+        elif options.upper == kConstant:
+            out[..., nlyr] = var[..., nlyr - 1]
+        else:
+            raise ValueError("Unsupported upper boundary condition")
+
+    # Positivity check
+    if options.check_positivity:
+        error = torch.nonzero(out < 0)
+        if error.size(0) > 0:
+            print("Negative values found at cell interface: indices =", error)
+            raise ValueError("layer2level check failed")
 
     return out
