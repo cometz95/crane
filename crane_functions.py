@@ -300,6 +300,8 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
 
 def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn):
     atm["temp"] += dTdt_atm * dt_dyn
+    print("atm[temp]: ", atm["temp"])
+    print("dT: ", dTdt_atm * dt_dyn)
     # Check for clamping
     if torch.any(atm["temp"] < 50):
         print("Warning: Atmospheric temperature was clamped to a minimum of 50 K")
@@ -335,17 +337,22 @@ def init_from_file(photo_filename, options, pbot, ptop):
     file_pres = np.array(chem_atmosphere_data["press"])  # in bar
     file_temp = np.array(chem_atmosphere_data["temp"])   # in K
 
+    #file_alt = np.array(chem_atmosphere_data["alt"])
+
     # Create harp model pressure grid (in Pa)
     pres = torch.logspace(np.log10(file_pres[0]*1e5), np.log10(file_pres[-1]*1e5), options.nlyr, dtype=torch.float64)
+
     #pres = torch.logspace(np.log10(pbot*1e5), np.log10(ptop*1e5), options.nlyr, dtype=torch.float64)
     pres = pres.unsqueeze(0).expand(options.ncol, -1).contiguous()
 
     # Interpolate temperature onto model grid (convert pres to bar for interpolation)
+
     interp_temp = np.interp(
         (pres[0].cpu().numpy() / 1e5),
         file_pres[::-1],
         file_temp[::-1]
     )
+    #print(pres[0].cpu().numpy() / 1e5)
     temp = torch.tensor(interp_temp, dtype=torch.float64).unsqueeze(0).expand(options.ncol, -1).contiguous()
 
     # Initialize xfrac as zeros, will be filled in later in program

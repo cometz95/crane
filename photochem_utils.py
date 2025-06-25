@@ -15,6 +15,9 @@ from pyharp import (
 )
 
 kb_cgs = 1.380649e-16  # Boltzmann constant in erg/K
+kb_SI = 1.381e-23
+N_avo = 6.022e23
+
 # Constants for interpolation options (used in layer2level)
 k2ndOrder = 2
 k4thOrder = 4
@@ -225,7 +228,6 @@ def run_photochem_onestep_andplot_save(x_atm_all, options, photo_binary_filename
 
     #pc.out2atmosphere_txt(photo_intermediate_filename, overwrite=True)
     #print(pc.var.temperature)
-    print('pc.pres', pc.wrk.pressure/1e6)
 
     if do_plot:
         plot_chem_each_timestep(pc, options)
@@ -271,8 +273,8 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
         pc.evolve(photo_binary_filename, tstart, pc.wrk.usol, np.array([dt_photo]), overwrite=True)
 
     #pc.out2atmosphere_txt(photo_intermediate_filename, overwrite=True)
-    #print(pc.var.temperature)
-    #print('pc.pres', pc.wrk.pressure/1e6)
+    print('pc.temp', pc.var.temperature)
+    print('pc.pres', pc.wrk.pressure/1e6)
 
     if do_plot:
         plot_chem_each_timestep(pc, options)
@@ -303,7 +305,7 @@ def make_atmosphere_z_grid_from_yaml(yaml_path):
         z_centers[i] = np.sum(dz_layers[:i]) + dz_layers[i] / 2
     return z_centers
 
-def update_photochem_alt_only(photo_intermediate_filename, yaml_path):
+def update_photochem_alt_only_save(photo_intermediate_filename, yaml_path):
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
     # Compute new altitude grid at layer centers
@@ -318,25 +320,60 @@ def update_photochem_alt_only(photo_intermediate_filename, yaml_path):
         updates,
         output_filepath=photo_intermediate_filename
     )
-    
-def update_photochem_all_save(photo_intermediate_filename, new_atm, x_atm_all, options):
+
+def update_photochem_alt_only(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options):
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
+
+    # Compute new altitude grid at layer centers
+    z_centers = make_atmosphere_z_grid_from_yaml(yaml_path)
+    temp = Tsurf - lapserate_lower * z_centers
+    # Find where temp first hits T_min
+    below_min = temp < T_min
+    if np.any(below_min):
+        first_min_idx = np.argmax(below_min)
+        temp[first_min_idx:] = T_min + lapserate_upper * (z_centers[first_min_idx:] - z_centers[first_min_idx])
+    temp = np.maximum(temp, T_min)
+    print(temp)
+    g_ov_R = torch.ones(len(temp)) * (options.mean_mol_weight * options.grav / constants.Rgas)
+    pbot = 0.53
+    p = calc_p_hypsometric(z_centers, temp, g_ov_R, pbot)
+    new_dens = np.array(p)*10 / (kb_cgs * temp)
+
+    updates = {
+        "alt": z_centers,
+        "temp": temp,
+        "press": p/1e5, #convert pa to bar
+        "den": new_dens
+    }
+
+    modify_atmospheric_parameters(
+        old_chem_atmosphere_data,
+        updates,
+        output_filepath=photo_intermediate_filename
+    )
+
+def update_photochem_all_save(photo_intermediate_filename, new_atm, x_atm_all, options, pbot):
+    #need to write pchem zgrid the first time before this is called
+    old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
+
+    new_atm_alt = calc_altitude_profile(new_atm["pres"], new_atm["temp"], options)
+    print("atm[pres]: ", new_atm["pres"])
+    print('new_atm_alt: ', new_atm_alt)
     
     # Interpolate the new radiation atmosphere data to match the number of layers in the photochemical model
     new_temp = np.interp(
-        old_chem_atmosphere_data["press"], 
-        (new_atm["pres"].squeeze().cpu().numpy() / 1e5)[::-1],  # Convert to 1D array and convert Pa to bar
-        new_atm["temp"].squeeze().cpu().numpy()[::-1]           # Convert to 1D array
+        old_chem_atmosphere_data["alt"], 
+        new_atm_alt,  # Convert to 1D array
+        new_atm["temp"].squeeze().cpu().numpy() # Convert to 1D array
     )
-
-    new_dens = np.array(old_chem_atmosphere_data["press"])*1e6 / (kb_cgs * new_temp)
-
-    altitude_profile = calc_altitude_profile(old_chem_atmosphere_data["press"], new_temp, options)
+    g_ov_R = torch.ones(len(new_temp)) * (options.mean_mol_weight * options.grav / constants.Rgas)
+    p = calc_p_hypsometric(old_chem_atmosphere_data['alt'], new_temp, g_ov_R, pbot)
+    new_dens = np.array(p)*10 / (kb_cgs * new_temp)
 
     updates = {
         "temp": new_temp,
-        "den": new_dens
-        #"alt": altitude_profile
+        "den": new_dens,
+        "press": p/1e5
     }
 
     # Directly update all species in x_atm_all (no interpolation needed)
@@ -365,15 +402,31 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, option
         new_atm_alt,  # Convert to 1D array
         new_atm["temp"].squeeze().cpu().numpy() # Convert to 1D array
     )
-    g_ov_R = torch.ones(len(new_temp)) * (options.mean_mol_weight * options.grav / constants.Rgas)
-    p = calc_p_hypsometric(old_chem_atmosphere_data['alt'], new_temp, g_ov_R, pbot)
-    new_dens = np.array(p)*10 / (kb_cgs * new_temp)
+
+    alt = np.array(old_chem_atmosphere_data["alt"])
+    dz = np.zeros_like(alt)
+    dz[0] = alt[0]  # If alt[0] is not zero, this is the thickness from surface to first center
+    dz[1:] = alt[1:] - alt[:-1]
+    dz *= 1e3
+    nz = len(alt)
+
+    pressure = np.zeros(nz)
+    density = np.zeros(nz)
+
+    # First layer
+    T_temp = new_temp[0]
+    pressure[0] = pbot * 1e6 * np.exp(-((options.mean_mol_weight * options.grav) / (N_avo * kb_SI * T_temp)) * dz[0])
+    density[0] = pressure[0] / (kb_cgs * new_temp[0])
+
+    # Other layers
+    for i in range(1, nz):
+        pressure[i] = pressure[i-1] * np.exp(-((options.mean_mol_weight * options.grav) / (N_avo * kb_SI * new_temp[i])) * dz[i])
+        density[i] = pressure[i] / (kb_cgs * new_temp[i])
 
     updates = {
         "temp": new_temp,
-        "den": new_dens,
-        "press": p/1e5
-        #"alt": altitude_profile
+        "den": density,
+        "press": pressure / 1e6  # Convert to bar
     }
 
     # Directly update all species in x_atm_all (no interpolation needed)
@@ -388,7 +441,7 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, option
 
     modify_atmospheric_parameters(old_chem_atmosphere_data, updates, output_filepath=photo_intermediate_filename) 
 
-    return new_dens
+    return density
 
 def calc_dxdt(photo_den, photo_binary_filename, photo_intermediate_filename, dt_photo):
     """
@@ -673,11 +726,35 @@ if __name__ == "__main__":
     #pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     #test_whats_going_on('atmosphere_intermediate.bin', pchem_species_dict)
     #test_whats_going_on('atmosphere_intermediate_aeroscale0.1_radius0.1um.bin', pchem_species_dict)
-    #data = load_atmosphere_file('atmosphere_intermediate_aeroscale0.1_radius0.1um.txt')
-    #plt.plot(data["temp"],data["press"])
-    #plt.gca().invert_yaxis()
-    #plt.yscale("log")
-    #plt.show()
+    data = load_atmosphere_file('atmosphere_intermediate_aeroscale0.1_radius0.1um_Tmin140.txt')
+    plt.plot(data["temp"],data["press"])
+    plt.gca().invert_yaxis()
+    plt.yscale("log")
+    plt.show()
 
-    zc= make_atmosphere_z_grid_from_yaml('settings.yaml')
-    print(zc)
+    #zc= make_atmosphere_z_grid_from_yaml('settings.yaml')
+    #print(zc)
+'''
+    from amars_rt import RadiationModelOptions
+    options = RadiationModelOptions(
+        ncol=1,
+        nlyr=80,
+        nstr = 4,
+        grav=3.711,  # Gravitational acceleration on Mars
+        mean_mol_weight=0.044,  # Mean molecular weight of CO2 (kg/mol)
+        cp=844,  # Specific heat capacity of CO2 (J/(kg K))
+        aerosol_scale_factor = 0.1,  # Aerosol scaling factor
+        cSurf=200000,  # Surface thermal inertia (J/(m^2 K))
+        kappa=2.0e-2,  # Thermal diffusivity (m^2/s)
+        surf_sw_albedo = 0.3,
+        sr_sun = 2.92842e-5,
+        btemp0 = 240,
+        ttemp0 = 140,
+        solar_temp = 5772,
+        lum_scale = 0.7/4, #adjust by 0.7 for age of the sun, and 1/4 for global average
+        nspecies = 5,
+        coszen = 1,
+        nswbin = 200 
+    )
+'''
+    #update_photochem_alt_only('atmosphere_init_stable.txt', 'settings.yaml', 5, 200, 100, options)

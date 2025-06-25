@@ -41,7 +41,7 @@ if __name__ == "__main__":
     dt_dyn = 86400.0/4      #seconds
     dt_rad = dt_dyn
     dt_photo = dt_dyn
-    t_lim = dt_dyn*500     #length of time to run the model for, in seconds
+    t_lim = dt_dyn**4*365*10     #length of time to run the model for, in seconds
     writeout_step = 1
 
     #names of species we are about for RT and condensation, length must match options.nspecies
@@ -51,7 +51,7 @@ if __name__ == "__main__":
     condensate_harp_key = 'xSO2'
 
     #io file names
-    case_name = 'aeroscale0.1_radius0.1um'
+    case_name = 'aeroscale0.1_radius0.1um_newp'
     init_xfrac_filebase = 'atmosphere_init_stable.txt'
 
     photo_init_filename = 'atmosphere_init' + f'_{case_name}' + '.txt'
@@ -73,7 +73,9 @@ if __name__ == "__main__":
     }
 
     shutil.copy(photo_init_filename, photo_intermediate_filename)
-    update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml')
+    #update_photochem_alt_only(photo_intermediate_filename, yaml_path, lapserate, Tsurf, Tmin, options)
+    #update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml')
+    update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml', (options.grav/options.cp)*1000, 0, 200, 100, options)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, pbot, ptop) # Load the initial atmosphere from the photochem file
     dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pbot)
 
