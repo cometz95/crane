@@ -357,7 +357,6 @@ def init_from_file(photo_filename, options, z_levels_km):
         "xS8aer": xfrac[:, :]
     }
     pressure = calc_pressure_atm_tensor(atm, options)
-    print(pressure.shape)
     atm["pres"] = pressure
 
     # Build x_atm_all dict with all species (excluding non-mixing ratio keys)
@@ -484,8 +483,6 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     #psuedo_precip_rate = check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key)
     #print('pseudo precip rate: ', pseudo_precip_rate)
 
-    print(lapse_rate)
-    print(dTdz_btwn_layers)
     atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
     atm["pres"] = calc_pressure_atm_tensor(atm, options)
     return atm, precip_rate, amd_layer
