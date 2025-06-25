@@ -3,9 +3,9 @@ import shutil
 import pandas as pd
 import copy
 
-from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment, set_pgrid_from_file
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt
-from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, setup_presure_grid_init_temp2, update_photochem_alt_only
+from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
+from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, update_photochem_alt_only
 
 if __name__ == "__main__":
     options = RadiationModelOptions(
@@ -14,7 +14,7 @@ if __name__ == "__main__":
         nstr = 4,
         grav=3.711,  # Gravitational acceleration on Mars
         mean_mol_weight=0.044,  # Mean molecular weight of CO2 (kg/mol)
-        cp=844,  # Specific heat capacity of CO2 (J/(kg K))
+        cv=658,  # Specific heat capacity of CO2 (J/(kg K)) at const volume
         aerosol_scale_factor = 0.1,  # Aerosol scaling factor
         cSurf=200000,  # Surface thermal inertia (J/(m^2 K))
         kappa=2.0e-2,  # Thermal diffusivity (m^2/s)
@@ -26,11 +26,10 @@ if __name__ == "__main__":
         lum_scale = 0.7/4, #adjust by 0.7 for age of the sun, and 1/4 for global average
         nspecies = 5,
         coszen = 1,
-        nswbin = 200 
+        nswbin = 200,
+        pbot = 0.53
     )
-    pbot = 0.53 #total surface pressure in bars
     ptop = 1e-7 #ptop at the TOA in bars
-    pSurf_CO2 = 0.5 #partial pressure of CO2 at the surface, in bars
     #surface pressures of other gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
 
     shared = {}
@@ -41,7 +40,7 @@ if __name__ == "__main__":
     dt_dyn = 86400.0/4      #seconds
     dt_rad = dt_dyn
     dt_photo = dt_dyn
-    t_lim = dt_dyn**4*365*10     #length of time to run the model for, in seconds
+    t_lim = dt_dyn*4*365*10     #length of time to run the model for, in seconds
     writeout_step = 1
 
     #names of species we are about for RT and condensation, length must match options.nspecies
@@ -51,7 +50,7 @@ if __name__ == "__main__":
     condensate_harp_key = 'xSO2'
 
     #io file names
-    case_name = 'aeroscale0.1_radius0.1um_newp'
+    case_name = 'aeroscale0.1_radius0.1um_constz'
     init_xfrac_filebase = 'atmosphere_init_stable.txt'
 
     photo_init_filename = 'atmosphere_init' + f'_{case_name}' + '.txt'
@@ -75,9 +74,9 @@ if __name__ == "__main__":
     shutil.copy(photo_init_filename, photo_intermediate_filename)
     #update_photochem_alt_only(photo_intermediate_filename, yaml_path, lapserate, Tsurf, Tmin, options)
     #update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml')
-    update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml', (options.grav/options.cp)*1000, 0, 200, 100, options)
-    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, pbot, ptop) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pbot)
+    z_levels_km = update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml', (options.grav/options.cv)*1000, 0, 200, 100, options)
+    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km) # Load the initial atmosphere from the photochem file
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot)
 
     step = 0
     tot_time = 0.0
@@ -101,11 +100,11 @@ if __name__ == "__main__":
                 options=options,
                 shared=shared)
 
-        atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn)
+        atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options)
         #atm_before_convadj = copy.deepcopy(atm)
 
         if step % int(dt_photo // dt_dyn) == 0:
-            photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
+            photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot)
             dxdt_dict = calc_dxdt(
                 photo_dens,
                 photo_binary_filename,
@@ -116,7 +115,7 @@ if __name__ == "__main__":
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
         #atm_after_convadj = copy.deepcopy(atm)
         #precip_rate_list.append(precip_rate)
-        #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs)
+        #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs, options)
         
         if step % writeout_step == 0:
             outputs["tot_time"].append(tot_time)

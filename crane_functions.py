@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import re
 import pandas as pd
 
-from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions
+from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions, layer2level_1var, calc_pressure_atm_tensor
 from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
 
 Rgas_SI = 8.314462618  # J/(mol K)
@@ -250,10 +250,10 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, pbot):
-    photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, pbot)
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot):
+    photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm["pres"], options)
+    rad, bc = config_amars_rt_init(atm["alt"], options)
 
     dxdt_dict = calc_dxdt(
         photo_dens,
@@ -283,13 +283,11 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
             x_atm_all[key] += dxdt_dict[key] * dt_dyn
             # Ensure non-negative
             x_atm_all[key] = torch.clamp(x_atm_all[key], min=1e-40)
-    
-    atm_alt = calc_altitude_profile(atm["pres"], atm["temp"], options)
 
     for photo_key, harp_key in zip(photo_keys, harp_keys):
         if photo_key in x_atm_all and harp_key in atm:
             interpolated_values = np.interp(
-                atm_alt,
+                (atm["alt"]/1e3).squeeze().cpu().numpy(),
                 photo_alt_grid,
                 x_atm_all[photo_key].squeeze().cpu().numpy()
             )
@@ -298,14 +296,14 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
             print(f"Warning: {photo_key} or {harp_key} not found in dxdt_dict or atm.")
     return x_atm_all, atm
 
-def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn):
+def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options):
     atm["temp"] += dTdt_atm * dt_dyn
-    print("atm[temp]: ", atm["temp"])
-    print("dT: ", dTdt_atm * dt_dyn)
     # Check for clamping
     if torch.any(atm["temp"] < 50):
         print("Warning: Atmospheric temperature was clamped to a minimum of 50 K")
     atm["temp"] = torch.clamp(atm["temp"], min=50)
+
+    atm["pres"] = calc_pressure_atm_tensor(atm, options)
 
     bc["btemp"] += dTdt_surf * dt_dyn
     if torch.any(bc["btemp"] < 50):
@@ -313,16 +311,7 @@ def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn):
     bc["btemp"] = torch.clamp(bc["btemp"], min=50)
     return atm, bc
 
-def init_atm_isothermal(atm_temp_init, ncol, nlyr, pbot, ptop, options):
-    temp = atm_temp_init * torch.ones((ncol, nlyr), dtype=torch.float64)
-    pres = torch.logspace(np.log10(pbot), np.log10(ptop), nlyr, dtype=torch.float64)
-    pres = pres.unsqueeze_(0).expand(ncol, -1).contiguous()
-    xfrac = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
-    atm = {"pres": pres, "temp": temp, "xCO2": xfrac[:, :, 0], "xH2O": xfrac[:, :, 1], "xSO2": xfrac[:, :, 2], "xH2SO4aer": xfrac[:, :, 3], "xS8aer": xfrac[:, :, 4]}
-
-    return temp, pres, xfrac, atm
-
-def init_from_file(photo_filename, options, pbot, ptop):
+def init_from_file(photo_filename, options, z_levels_km):
     """
     Initialize atmospheric state from a photochem file.
 
@@ -334,64 +323,51 @@ def init_from_file(photo_filename, options, pbot, ptop):
     chem_atmosphere_data = load_atmosphere_file(photo_filename)
 
     # Get pressure and temperature from file (assume in bar and K)
-    file_pres = np.array(chem_atmosphere_data["press"])  # in bar
     file_temp = np.array(chem_atmosphere_data["temp"])   # in K
+    file_alt = np.array(chem_atmosphere_data["alt"])
 
-    #file_alt = np.array(chem_atmosphere_data["alt"])
+    # Create harp model altitude grid (in meters)
+    alt = torch.linspace(file_alt[0]*1e3, file_alt[-1]*1e3, options.nlyr, dtype=torch.float64)
+    alt = alt.unsqueeze(0).expand(options.ncol, -1).contiguous()
 
-    # Create harp model pressure grid (in Pa)
-    pres = torch.logspace(np.log10(file_pres[0]*1e5), np.log10(file_pres[-1]*1e5), options.nlyr, dtype=torch.float64)
+    z_levels_rt = torch.linspace(z_levels_km[0]*1e3, z_levels_km[-1]*1e3, options.nlyr + 1, dtype=torch.float64)
+    dz_between_levels = z_levels_rt[1:] - z_levels_rt[:-1]  # shape: [nlyr]
 
-    #pres = torch.logspace(np.log10(pbot*1e5), np.log10(ptop*1e5), options.nlyr, dtype=torch.float64)
-    pres = pres.unsqueeze(0).expand(options.ncol, -1).contiguous()
-
-    # Interpolate temperature onto model grid (convert pres to bar for interpolation)
-
+    # Interpolate temperature onto model grid (convert alt to km for interpolation)
     interp_temp = np.interp(
-        (pres[0].cpu().numpy() / 1e5),
-        file_pres[::-1],
-        file_temp[::-1]
+        (alt[0].cpu().numpy() / 1e3),
+        file_alt,
+        file_temp
     )
-    #print(pres[0].cpu().numpy() / 1e5)
     temp = torch.tensor(interp_temp, dtype=torch.float64).unsqueeze(0).expand(options.ncol, -1).contiguous()
 
     # Initialize xfrac as zeros, will be filled in later in program
-    xfrac = torch.zeros((options.ncol, options.nlyr, options.nspecies), dtype=torch.float64)
+    #xfrac = torch.zeros((options.ncol, options.nlyr, options.nspecies), dtype=torch.float64)
+    xfrac = torch.zeros((options.ncol, options.nlyr), dtype=torch.float64)
 
     # Build atm dictionary (species order must match your convention)
     atm = {
-        "pres": pres,
+        "alt": alt,
+        "dz": dz_between_levels,
         "temp": temp,
-        "xCO2": xfrac[:, :, 0],
-        "xH2O": xfrac[:, :, 1],
-        "xSO2": xfrac[:, :, 2],
-        "xH2SO4aer": xfrac[:, :, 3],
-        "xS8aer": xfrac[:, :, 4]
+        "xCO2": xfrac[:, :],
+        "xH2O": xfrac[:, :],
+        "xSO2": xfrac[:, :],
+        "xH2SO4aer": xfrac[:, :],
+        "xS8aer": xfrac[:, :]
     }
+    pressure = calc_pressure_atm_tensor(atm, options)
+    print(pressure.shape)
+    atm["pres"] = pressure
 
-    # Build x_atm_all dict with all species (excluding special keys)
+    # Build x_atm_all dict with all species (excluding non-mixing ratio keys)
     exclude_keys = {"alt", "press", "den", "temp", "eddy"}
     x_atm_all = {}
     for key in chem_atmosphere_data:
         if key not in exclude_keys and not key.endswith("_r"):
             x_atm_all[key] = torch.tensor(chem_atmosphere_data[key], dtype=torch.float64).unsqueeze(0).expand(options.ncol, -1).contiguous()
 
-    return temp, pres, xfrac, atm, x_atm_all
-
-def set_pgrid_from_file(photo_filename, options, atm):
-    chem_atmosphere_data = load_atmosphere_file(photo_filename)
-
-    # Get pressure and temperature from file (assume in bar and K)
-    file_pres = np.array(chem_atmosphere_data["press"])  # in bar
-
-    # Create harp model pressure grid (in Pa)
-    pres = torch.logspace(np.log10(file_pres[0]*1e5), np.log10(file_pres[-1]*1e5), options.nlyr, dtype=torch.float64)
-    #pres = torch.logspace(np.log10(pbot*1e5), np.log10(ptop*1e5), options.nlyr, dtype=torch.float64)
-    pres = pres.unsqueeze(0).expand(options.ncol, -1).contiguous()
-
-    atm["pres"] = pres
-
-    return atm
+    return temp, alt, xfrac, atm, x_atm_all
 
 #Tprime = new_temps
 #T0 = atm["temp"]
@@ -412,8 +388,9 @@ def calc_latent_heat_dT(condensate_properties, Tprime, atm, options):
 #k_cond in photochem should be set so that the vp0 follows the SVP(T0) (rh=1)
 #then we assume all precip falls out to bring the parcel to the SVP(Tprime)
 def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key):
-    dz = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-    vp0 = atm[condensate_harp_key] * atm["pres"] #use the real vapor pressure that the condensate was at, don't assume saturation
+    pressure = calc_pressure_atm_tensor(atm, options)
+    dz = atm["dz"]
+    vp0 = atm[condensate_harp_key] * pressure #use the real vapor pressure that the condensate was at, don't assume saturation
     rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * atm["temp"])  # partial density of the species in the parcel
     svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
     rho_sat_prime = (svp_prime * condensate_properties.saturation_data.mu) / (Rgas_SI * new_temps)  # partial density of the species in the parcel at T'
@@ -430,7 +407,8 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
 #assumining radiative-convective equilibrium, all energy to drive precip comes from radiative heating
 #the moving average of the real precip rate should always equal the pseudo precip rate, at least while evaporation is energetically free
 def calc_pseudo_precip_rate(atm, old_temps, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling):
-    dz = calc_dz_hypsometric(atm["pres"], new_temps, tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+    pressure = calc_pressure_atm_tensor(atm, options)
+    dz = atm["dz"]
     vp0 = condensate_properties.saturation_data.sat_pressure(old_temps)  # Saturation vapor pressure at T0
     rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * old_temps)  # partial density of the species in the parcel
     svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
@@ -449,39 +427,44 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     tolerance = 1.01 #to avoid numerical issues
     mmr = atm[condensate_harp_key]*(condensate_properties.saturation_data.mu/options.mean_mol_weight)  # convert molar mixing ratio to mass mixing ratio
     #MLR from Emanuel 1993, eqn 4.7.3
-    moist_lapse_rate = (options.grav / options.cp) * ( (1 + mmr)/(1 + mmr * condensate_properties.cp(atm["temp"])/ options.cp) ) * ((1 + (condensate_properties.saturation_data.latent_heat(atm["temp"]) * mmr * options.mean_mol_weight)/(Rgas_SI * atm["temp"]))/(1 + (mmr*(1+mmr*(options.mean_mol_weight/condensate_properties.saturation_data.mu))*condensate_properties.saturation_data.latent_heat(atm["temp"])**2)/((Rgas_SI/condensate_properties.saturation_data.mu)*(options.cp + mmr * condensate_properties.cp(atm["temp"]))*atm["temp"]**2)))
-    dz_btwn_levels = calc_dz_hypsometric(atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
+    condensate_cv = condensate_properties.cp(atm["temp"]) - Rgas_SI/condensate_properties.saturation_data.mu
+    #moist_lapse_rate = (options.grav / options.cp) * ( (1 + mmr)/(1 + mmr * condensate_properties.cp(atm["temp"])/ options.cp) ) * ((1 + (condensate_properties.saturation_data.latent_heat(atm["temp"]) * mmr * options.mean_mol_weight)/(Rgas_SI * atm["temp"]))/(1 + (mmr*(1+mmr*(options.mean_mol_weight/condensate_properties.saturation_data.mu))*condensate_properties.saturation_data.latent_heat(atm["temp"])**2)/((Rgas_SI/condensate_properties.saturation_data.mu)*(options.cp + mmr * condensate_properties.cp(atm["temp"]))*atm["temp"]**2)))
+    moist_lapse_rate = (options.grav / options.cv) * ( (1 + mmr)/(1 + mmr * condensate_cv/ options.cv) ) * ((1 + (condensate_properties.saturation_data.latent_heat(atm["temp"]) * mmr * options.mean_mol_weight)/(Rgas_SI * atm["temp"]))/(1 + (mmr*(1+mmr*(options.mean_mol_weight/condensate_properties.saturation_data.mu))*condensate_properties.saturation_data.latent_heat(atm["temp"])**2)/((Rgas_SI/condensate_properties.saturation_data.mu)*(options.cv + mmr * condensate_cv)*atm["temp"]**2)))
+    #print the shape of all tensors involved in generating moist_lapse_rate:
+
+    dz_btwn_levels = atm["dz"]
     l2l = Layer2LevelOptions(order = k2ndOrder)
-    plevels = layer2level(dz_btwn_levels, atm["pres"], l2l)  # Get pressure on the levels
-    dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) #interpolate the normal dz, which is dist between levels, so that we have the distance between layer centers
+    #dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) #interpolate the normal dz, which is dist between levels, so that we have the distance between layer centers
+    dz_btwn_layers = atm["alt"][0, 1:] - atm["alt"][0, :-1]
     new_temps = atm["temp"].clone()
     dTdz_btwn_layers = torch.zeros_like(atm["temp"][:, :-1])
     for k in range(options.nlyr - 1):
-        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+        dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[k]
 
     lapse_rate = torch.ones_like(new_temps[:, :-1])
     moist_lapse_rate_btwn_layers = layer2level(dz_btwn_levels, moist_lapse_rate, l2l)
     moist_lapse_rate_btwn_layers = moist_lapse_rate_btwn_layers[:, 1:-1] #discard the first and last level
-    lapse_rate[0, :] = moist_lapse_rate_btwn_layers.squeeze()
+    lapse_rate[0, :] = moist_lapse_rate_btwn_layers
 
     do_again = True
     ntries = 0
     max_ntries = 2000 # so that we don't get stuck in an infinite loop if the conv adjustment fails to converge
-    while do_again and ntries < max_ntries:  
+    while do_again and ntries < max_ntries:
+        pressure = calc_pressure_atm_tensor(atm, options)
+        plevels = layer2level(dz_btwn_levels, pressure, l2l)
+
         for k in range(options.nlyr - 1):
             dp_k = plevels[0, k] - plevels[0, k + 1]
             dp_kplus1 = plevels[0, k + 1] - plevels[0, k + 2]
             if dTdz_btwn_layers[0, k] > lapse_rate[0, k]: #convection only happens when dTdz exceeds the moist lapse rate
                 new_temps[0, k + 1] = (
-                    dp_k * (new_temps[0, k] - lapse_rate[0, k] * dz_btwn_layers[0, k+1])
+                    dp_k * (new_temps[0, k] - lapse_rate[0, k] * dz_btwn_layers[k])
                     + dp_kplus1 * new_temps[0, k + 1]
                 ) / (dp_k + dp_kplus1)
-                new_temps[0, k] = new_temps[0, k + 1] + lapse_rate[0, k] * dz_btwn_layers[0, k+1]
+                new_temps[0, k] = new_temps[0, k + 1] + lapse_rate[0, k] * dz_btwn_layers[k]
 
-        dz_btwn_levels = calc_dz_hypsometric(atm["pres"], new_temps[0, :], tensor(options.mean_mol_weight * options.grav / constants.Rgas))
-        dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) 
         for k in range(options.nlyr - 1):
-            dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[0, k+1]
+            dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[k]
 
         if (dTdz_btwn_layers[0, :] > lapse_rate[0, :] * tolerance).any():
             do_again = True
@@ -501,7 +484,10 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     #psuedo_precip_rate = check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key)
     #print('pseudo precip rate: ', pseudo_precip_rate)
 
+    print(lapse_rate)
+    print(dTdz_btwn_layers)
     atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
+    atm["pres"] = calc_pressure_atm_tensor(atm, options)
     return atm, precip_rate, amd_layer
 
 def check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key):
@@ -626,14 +612,16 @@ def plot_precip_history(in_name,ignore_first_indices,window_size):
     plt.ylabel('precip rate [mm/hr]')
     plt.show()
 
-def plot_convective_adjustment(atm_before, atm_after, precip_rate, amd_layer, fig, axs):
+def plot_convective_adjustment(atm_before, atm_after, precip_rate, amd_layer, fig, axs, options):
     ax1, ax2, ax3 = axs  # Unpack the three subplots
 
     # --- Temperature difference plot ---
+    pressure_before = calc_pressure_atm_tensor(atm_before, options)
+    pressure_after = calc_pressure_atm_tensor(atm_after, options)
     ax1.cla()
-    temp_before = np.array(atm_before["temp"]).flatten()
-    temp_after = np.array(atm_after["temp"]).flatten()
-    pres = np.array(atm_before["pres"]).flatten()/1e5  # Pressure in bar
+    temp_before = np.array(pressure_before).flatten()
+    temp_after = np.array(pressure_after).flatten()
+    pres = np.array(pressure_before).flatten()/1e5  # Pressure in bar
     temp_diff = temp_after - temp_before
 
     ax1.plot(temp_diff, pres, 'k-', label='After - Before')

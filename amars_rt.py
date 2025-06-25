@@ -12,6 +12,10 @@ from pyharp import (
 )
 
 stefanBoltzmannConst = 5.67e-8  # Stefan-Boltzmann constant (W/(m^2 K^4))
+kb_cgs = 1.380649e-16  # Boltzmann constant in erg/K
+kb_SI = 1.381e-23
+N_avo = 6.022e23
+
 # Constants for interpolation options (used in layer2level)
 k2ndOrder = 2
 k4thOrder = 4
@@ -19,15 +23,15 @@ kExtrapolate = 0
 kConstant = 1
 
 class RadiationModelOptions:
-    def __init__(self, ncol, nlyr, nstr, grav, mean_mol_weight, cp, aerosol_scale_factor, cSurf, kappa, 
+    def __init__(self, ncol, nlyr, nstr, grav, mean_mol_weight, cv, aerosol_scale_factor, cSurf, kappa, 
                  surf_sw_albedo, sr_sun, btemp0, ttemp0, solar_temp,
-                 lum_scale, nspecies, coszen, nswbin):
+                 lum_scale, nspecies, coszen, nswbin, pbot):
         self.ncol = ncol  # Number of columns
         self.nlyr = nlyr  # Number of layers
         self.nstr = nstr
         self.grav = grav  # Gravitational acceleration (m/s^2)
         self.mean_mol_weight = mean_mol_weight  # Mean molecular weight (kg/mol)
-        self.cp = cp  # Specific heat capacity (J/(kg K))
+        self.cv = cv  # Specific heat capacity (J/(kg K))
         self.aerosol_scale_factor = aerosol_scale_factor  # Aerosol scaling factor
         self.cSurf = cSurf  # Surface thermal inertia (J/(m^2 K))
         self.kappa = kappa  # Thermal diffusivity (m^2/s)
@@ -41,10 +45,11 @@ class RadiationModelOptions:
         self.nspecies = nspecies
         self.coszen = coszen
         self.nswbin = nswbin
+        self.pbot = pbot
 
 
-def config_amars_rt_init(pres, options):
-    ncol, nlyr = pres.shape
+def config_amars_rt_init(alt, options):
+    ncol, nlyr = alt.shape
     bc = {}
 
     rad_op = RadiationOptions.from_yaml("amars-ck.yaml")
@@ -88,11 +93,10 @@ def config_amars_rt_init(pres, options):
     return rad, bc
 
 def calc_amars_rt(rad, atm, bc, options):
-    dz = calc_dz_hypsometric(
-        atm["pres"], atm["temp"], tensor(options.mean_mol_weight * options.grav / constants.Rgas)
-    )
+    dz = atm["dz"]
         
-    ncol, nlyr = atm["pres"].shape
+    ncol, nlyr = atm["alt"].shape
+    pressure = calc_pressure_atm_tensor(atm, options)
 
     conc = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
     conc[:, :, 0] = atm["xCO2"]
@@ -101,18 +105,16 @@ def calc_amars_rt(rad, atm, bc, options):
     conc[:, :, 3] = atm["xH2SO4aer"] * options.aerosol_scale_factor
     conc[:, :, 4] = atm["xS8aer"]  * options.aerosol_scale_factor
 
-    conc *= atm["pres"].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
+    conc *= pressure.unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
     netflux, downward_flux, upward_flux = rad.forward(conc, dz, bc, atm)
 
     return netflux, downward_flux, upward_flux
 
 def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
 
-    dz = calc_dz_hypsometric(
-        atm["pres"],
-        atm["temp"],
-        torch.tensor([options.mean_mol_weight * options.grav / constants.Rgas])
-    )
+    dz = atm["dz"]
+
+    pressure = calc_pressure_atm_tensor(atm, options)
 
     # Add thermal diffusion flux
     vec = list(atm["temp"].size())
@@ -135,7 +137,7 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
     shared["result/dTdt_surf"] = dTdt_surf
 
     # Density (rho)
-    rho = (atm["pres"] * options.mean_mol_weight) / \
+    rho = (pressure * options.mean_mol_weight) / \
           (constants.Rgas * atm["temp"])
 
     # Density at levels
@@ -143,11 +145,11 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
     rhoh = layer2level(dz, rho.log(), l2l).exp()
 
     # Thermal diffusion flux
-    thermal_flux = -options.kappa * rhoh * options.cp * dTdz
+    thermal_flux = -options.kappa * rhoh * options.cv * dTdz
     shared["result/thermal_diffusion_flux"] = thermal_flux
 
     # Atmospheric temperature change (dT_atm)
-    dTdt_atm = -1 / (rho * options.cp * dz) * (
+    dTdt_atm = -1 / (rho * options.cv * dz) * (
         netflux.narrow(-1, 1, options.nlyr) +
         thermal_flux.narrow(-1, 1, options.nlyr) -
         netflux.narrow(-1, 0, options.nlyr) -
@@ -311,3 +313,43 @@ def layer2level_1var(var, options):
             raise ValueError("layer2level check failed")
 
     return out
+
+#returns pressure in pa
+def calc_pressure_atm_tensor(atm, options):
+    pressure, den_molecules = calc_p_den_scaleheight(atm["alt"]/1e3, atm["temp"], options)
+    pressure = pressure/10 # convert to Pa
+    pressure = torch.tensor(pressure, dtype=torch.float64).unsqueeze(0)  # shape [1, nlyr]
+
+    return pressure
+
+#alt and temp are on layers
+#alt in km
+#pbot in bars
+#returns p and dens as np arrays
+#pressure is in dynes/cm^2, density is molecules/cm^3
+def calc_p_den_scaleheight(alt, temp, options):
+    # Assume alt and temp are 2D tensors with shape (1, nlyr)
+    alt = alt[0, :].cpu().numpy()  # Convert to 1D numpy array
+    temp = temp[0, :].cpu().numpy()
+    nz = len(alt)
+
+    dz = np.zeros(nz)
+    dz[0] = alt[0]
+    dz[1:] = alt[1:] - alt[:-1]
+    dz *= 1e3  # Convert km to m if alt is in km
+
+    pressure = np.zeros(nz)
+    density = np.zeros(nz)
+
+    # First layer
+    pressure[0] = options.pbot * 1e6 * np.exp(-((options.mean_mol_weight * options.grav) / (N_avo * kb_SI * temp[0])) * dz[0])
+    density[0] = pressure[0] / (kb_cgs * temp[0])
+
+    # Other layers
+    for i in range(1, nz):
+        T_temp = temp[i]
+        dz_i = dz[i]
+        pressure[i] = pressure[i-1] * np.exp(-((options.mean_mol_weight * options.grav) / (N_avo * kb_SI * T_temp)) * dz_i)
+        density[i] = pressure[i] / (kb_cgs * T_temp)
+
+    return pressure, density
