@@ -5,9 +5,11 @@ import copy
 
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt
 from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
-from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, update_photochem_alt_only
+from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles
 
 if __name__ == "__main__":
+    case_name = 'aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur'
+
     options = RadiationModelOptions(
         ncol=1,
         nlyr=80,
@@ -17,7 +19,7 @@ if __name__ == "__main__":
         cv=658,  # Specific heat capacity of CO2 (J/(kg K)) at const volume
         aerosol_scale_factor = 0.1,  # Aerosol scaling factor
         cSurf=200000,  # Surface thermal inertia (J/(m^2 K))
-        kappa=2.0e-2,  # Thermal diffusivity (m^2/s)
+        kappa=2.0e-10,  # Thermal diffusivity (m^2/s)
         surf_sw_albedo = 0.3,
         sr_sun = 2.92842e-5,
         btemp0 = 240,
@@ -29,8 +31,15 @@ if __name__ == "__main__":
         nswbin = 200,
         pbot = 0.53
     )
-    ptop = 1e-7 #ptop at the TOA in bars
-    #surface pressures of other gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
+
+    #init T profile stuff
+    lower_init_lapserate = (options.grav/options.cv)*1000    #kelvins/km
+    upper_init_lapserate = 0
+    Tsurf_init = 288
+    Tmin_upper = 190
+
+    #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
+    photo_settings_yaml_filename = 'settings.yaml'
 
     shared = {}
     do_plot = True #if True, plots the atmosphere at each timestep
@@ -50,7 +59,6 @@ if __name__ == "__main__":
     condensate_harp_key = 'xSO2'
 
     #io file names
-    case_name = 'aeroscale0.1_radius0.1um_constz'
     init_xfrac_filebase = 'atmosphere_init_stable.txt'
 
     photo_init_filename = 'atmosphere_init' + f'_{case_name}' + '.txt'
@@ -71,14 +79,20 @@ if __name__ == "__main__":
         "atm": []
     }
 
+    species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer', 'H2S','CO2','CO2aer','S8','S8aer']
+    water_condensate_properties = load_particle_info("H2Oaer", "zahnle_amars.yaml")
+    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, species_to_init, water_condensate_properties)
     shutil.copy(photo_init_filename, photo_intermediate_filename)
-    #update_photochem_alt_only(photo_intermediate_filename, yaml_path, lapserate, Tsurf, Tmin, options)
-    #update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml')
-    z_levels_km = update_photochem_alt_only(photo_intermediate_filename, 'settings.yaml', (options.grav/options.cv)*1000, 0, 200, 100, options)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename)
 
     step = 0
+    switch_index = 0
+
+    #can switch the photochem boundary conditions after a certain amount of time
+    do_switching_pchem_bc = True
+    times_to_switch =[1.577e8, t_lim + 1e8]
+    photo_settings_yaml_filenames = ['settings.yaml', 'settings2.yaml']
     tot_time = 0.0
 
     #plt.ion()
@@ -104,7 +118,7 @@ if __name__ == "__main__":
         #atm_before_convadj = copy.deepcopy(atm)
 
         if step % int(dt_photo // dt_dyn) == 0:
-            photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot)
+            photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
             dxdt_dict = calc_dxdt(
                 photo_dens,
                 photo_binary_filename,
@@ -127,6 +141,12 @@ if __name__ == "__main__":
 
         tot_time += dt_dyn
         step += 1
+
+        if do_switching_pchem_bc:
+            if tot_time > times_to_switch[switch_index]:
+                switch_index += 1
+                photo_settings_yaml_filename = photo_settings_yaml_filenames[switch_index]
+
         #print(step)
         #print('precip rate: ',precip_rate)
 

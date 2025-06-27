@@ -258,14 +258,14 @@ def config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_
             # Save the interpolated values to atm[harp_key]
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
 
-def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot):
+def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename):
     photo_dens = update_photochem_all(photo_intermediate_filename, atm, x_atm_all, options)
     photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
     photo_alt_grid = photo_atm_data["alt"]
 
     pc = EvoAtmosphere(
     'zahnle_amars.yaml',
-    'settings.yaml',
+    photo_settings_yaml_filename,
     'Sun_3.5Ga_s0_4.txt',
     photo_intermediate_filename
     )
@@ -315,7 +315,23 @@ def make_atmosphere_z_grid_from_yaml(yaml_path):
         z_centers[i] = np.sum(dz_btwn_levels[:i]) + dz_btwn_levels[i] / 2
     return z_centers, z_levels
 
-def update_photochem_alt_only(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options):
+#ASSUMES ALL SPECIES PASSED IN ARE 0 BESIDES H2O, WHICH IS AT SATURATION AT INITIAL TEMP
+#pres input is in pa
+def initialize_species_profiles(species_keys, temp, pres, condensate_properties, blank_value=1e-40):
+    n_layers = len(temp)
+    species_profiles = {}
+    blank_array = np.full(n_layers, blank_value)
+    for key in species_keys:
+        if key.upper() == "H2O":
+            # Initialize H2O to saturation mixing ratio profile
+            species_profiles[key] = condensate_properties.saturation_data.sat_pressure(temp) / pres
+        elif key.upper() == "CO2":
+            species_profiles[key] = 1 - species_profiles["H2O"]
+        else:
+            species_profiles[key] = blank_array.copy()
+    return species_profiles
+
+def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, species_keys, water_condensate_properties):
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
     # Compute new altitude grid at layer centers
@@ -338,6 +354,12 @@ def update_photochem_alt_only(photo_intermediate_filename, yaml_path, lapserate_
         "press": p/1e6, #convert dynes/cm^2 to bar
         "den": dens
     }
+
+    #converting p from dynes/cm^2 to Pa
+    species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, blank_value=1e-40)
+
+    for species, profile in species_profiles.items():
+        updates[species] = profile
 
     modify_atmospheric_parameters(
         old_chem_atmosphere_data,
@@ -648,7 +670,8 @@ if __name__ == "__main__":
     #pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     #test_whats_going_on('atmosphere_intermediate.bin', pchem_species_dict)
     #test_whats_going_on('atmosphere_intermediate_aeroscale0.1_radius0.1um.bin', pchem_species_dict)
-    data = load_atmosphere_file('atmosphere_intermediate_aeroscale0.1_radius0.1um_Tmin140.txt')
+    #data = load_atmosphere_file('atmosphere_intermediate_aeroscale0.1_radius0.1um_Tmin140.txt')
+    data = load_atmosphere_file('atmosphere_intermediate_aeroscale0.1_radius0.1um_constz_eartht.txt')
     plt.plot(data["temp"],data["press"])
     plt.gca().invert_yaxis()
     plt.yscale("log")

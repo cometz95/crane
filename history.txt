@@ -1,1 +1,0 @@
-#tot_time [s], surface_temp [K], precip_rate [m/s]

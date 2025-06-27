@@ -93,56 +93,56 @@ SW:
 
 B1:
   range: [1., 250.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [CO2]
   solver: disort
   integration: weight
   flags: lamber,quiet,onlyfl,planck
 
 B2:
   range: [250., 438.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [H2O]
   solver: disort
   integration: weight
   flags: lamber,quiet,onlyfl,planck
 
 B3:
   range: [438., 675.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [SO2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B4:
   range: [675., 1062.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [CO2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B5:
   range: [1062., 1200.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [SO2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B6:
   range: [1200., 1600.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [H2O]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B7:
   range: [1600., 1900.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [SO2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B8:
   range: [1900., 2000.]
-  opacities: [SO2, CO2, H2O]
+  opacities: [H2O]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck

@@ -29,6 +29,7 @@ def cgs_to_si_density(d_cgs):
 def cgs_to_si_mu(mu_cgs):
     return mu_cgs * 0.001  # g/mol to kg/mol
 
+#returns everything in SI units
 class SaturationData:
     def __init__(self, a_c, b_c, a_v, b_v, a_s, b_s, T_critical, T_triple, T_ref, P_ref, mu):
         self.a_c = a_c
@@ -250,8 +251,8 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot):
-    photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot)
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename):
+    photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
     rad, bc = config_amars_rt_init(atm["alt"], options)
 
@@ -297,18 +298,19 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
     return x_atm_all, atm
 
 def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options):
+    Tmin = 100
     atm["temp"] += dTdt_atm * dt_dyn
     # Check for clamping
-    if torch.any(atm["temp"] < 50):
-        print("Warning: Atmospheric temperature was clamped to a minimum of 50 K")
-    atm["temp"] = torch.clamp(atm["temp"], min=50)
+    if torch.any(atm["temp"] < Tmin):
+        print(f"Warning: Atmospheric temperature was clamped to a minimum of {Tmin} K")
+    atm["temp"] = torch.clamp(atm["temp"], min=Tmin)
 
     atm["pres"] = calc_pressure_atm_tensor(atm, options)
 
     bc["btemp"] += dTdt_surf * dt_dyn
-    if torch.any(bc["btemp"] < 50):
-        print("Warning: Surface temperature was clamped to a minimum of 50 K")
-    bc["btemp"] = torch.clamp(bc["btemp"], min=50)
+    if torch.any(bc["btemp"] < Tmin):
+        print(f"Warning: Surface temperature was clamped to a minimum of {Tmin} K")
+    bc["btemp"] = torch.clamp(bc["btemp"], min=Tmin)
     return atm, bc
 
 def init_from_file(photo_filename, options, z_levels_km):
@@ -657,8 +659,8 @@ def plot_convective_adjustment(atm_before, atm_after, precip_rate, amd_layer, fi
 
 if __name__ == "__main__":
     #plot_outputs("outputs_int.txt", 20, 20)  # Change window_size as needed
-    plot_outputs("outputs_int_wupdate2.txt", 20, 0)  # Change window_size as needed
-    #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "temp")
+    plot_outputs("outputs_intermediate_aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur.txt", 20, 0)  # Change window_size as needed
+    #plot_pt_history("outputs_intermediate_aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur.txt", "outputs_pt_int.png", "temp")
     #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xH2SO4aer")
     #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xS8aer")
     #plot_pt_history("outputs_int.txt", "outputs_pt_int.png", "xSO2")
