@@ -1,0 +1,14 @@
+s gas abundances:
+	calc S fluxes to atm:
+		Ntot = tot mass of sulfur released to atm / mass of 1 sulfur atom
+		Ntot = 3.8*10^17 kg of S / 5.324×10^-26 kilograms per atom
+		Ntot = 7.137×10^42 atoms
+		flux of SO2 and H2S are 1:1 stoichiometric with S
+
+	surface area of mars in cm^2 = 1.44413988 × 10^18
+	
+	so, releasing all S over 10 years gives a flux of:
+		(7.137×10^42)/((3.154×10^8)*(1.44413988 × 10^18))
+		1.567e16 molec/cm^2/s of SO2 or H2S 
+
+	if all S was released into atm at once in the form of so2, so2 partial pressure would be 200 mbar

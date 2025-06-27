@@ -2,8 +2,9 @@ import matplotlib.pyplot as plt
 import shutil
 import pandas as pd
 import copy
+import torch
 
-from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt
+from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
 from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
 from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles
 
@@ -40,6 +41,8 @@ if __name__ == "__main__":
 
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
     photo_settings_yaml_filename = 'settings.yaml'
+    h2so4_opacity_filename = "h2so4_0.1um_optical_constants.txt"
+    s8_opacity_filename = "s8_0.1um_optical_constants.txt"
 
     shared = {}
     do_plot = True #if True, plots the atmosphere at each timestep
@@ -79,12 +82,12 @@ if __name__ == "__main__":
         "atm": []
     }
 
-    species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer', 'H2S','CO2','CO2aer','S8','S8aer']
+    species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer','SO','O','S','H2S','CO2','CO2aer','S8','S8aer']
     water_condensate_properties = load_particle_info("H2Oaer", "zahnle_amars.yaml")
     z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, species_to_init, water_condensate_properties)
     shutil.copy(photo_init_filename, photo_intermediate_filename)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename)
 
     step = 0
     switch_index = 0

@@ -48,7 +48,7 @@ class RadiationModelOptions:
         self.pbot = pbot
 
 
-def config_amars_rt_init(alt, options):
+def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename):
     ncol, nlyr = alt.shape
     bc = {}
 
@@ -78,6 +78,19 @@ def config_amars_rt_init(alt, options):
                 (nwave, ncol), dtype=torch.float64
             )
             bc[name + "/umu0"] = options.coszen * ones((ncol,), dtype=torch.float64)
+            #h2so4
+            h2so4_species_id = 3
+            h2so4_species_mol_weight = 0.098
+            model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band.ww())
+            scripted = torch.jit.script(model)
+            scripted.save("h2so4.pt")
+            #s8
+            #s8_species_id = 4
+            #s8_species_mol_weight = 0.256
+            #model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band.ww())
+            #scripted = torch.jit.script(model)
+            #scripted.save("s8.pt")
+
         else:  # longwave
             #band.ww(band.query_weights())
             band.disort().wave_lower([wmin] * nwave)
@@ -353,3 +366,66 @@ def calc_p_den_scaleheight(alt, temp, options):
         density[i] = pressure[i] / (kb_cgs * T_temp)
 
     return pressure, density
+
+class JITAero(torch.nn.Module):
+    species_id = 0
+    def __init__(self, species_id, opacity_filename, rad_model_options, species_mol_weight, target_wavenumber_grid) -> torch.Tensor:
+        super().__init__()
+        self.species_id = species_id
+        self.opacity_filename = opacity_filename
+
+        target_wavenumber_grid = np.array(target_wavenumber_grid)
+        self.nwave = len(target_wavenumber_grid)
+        self.nlayers = rad_model_options.nlyr
+        self.ncol = rad_model_options.ncol
+        self.npmom = 4
+        self.nprop = 2 + self.npmom
+        self.mol_weight = species_mol_weight  # kg/mol
+
+        self.properties = read_opacity_file(self.opacity_filename)
+        wavelengths_readin = self.properties[:, 0]  # assuming first column is wavelength in microns
+
+        # Convert target wavenumber grid (cm^-1) to wavelength in microns
+        wavelength_target = 1e4 / target_wavenumber_grid
+
+        # Interpolate columns 1, 2, 3 (Python indices) onto the target grid
+        interp_props = []
+        for i in range(1, 4):
+            interp_col = np.interp(
+                wavelength_target,  # x-coords to interpolate to (in microns)
+                wavelengths_readin, # x-coords of data (in microns)
+                self.properties[:, i]  # y-coords of data
+            )
+            interp_props.append(interp_col)
+
+        # Stack: shape will be (nwave, 3)
+        interp_props = np.stack(interp_props, axis=1)
+
+        # Overwrite self.properties with new grid: first column is wavenumber, then interpolated properties
+        self.properties = np.concatenate([
+            target_wavenumber_grid.reshape(-1, 1),  # shape (nwave, 1)
+            interp_props  # shape (nwave, 3)
+        ], axis=1)
+        self.properties = torch.tensor(self.properties, dtype=torch.float64)
+
+    def forward(self, conc) -> torch.Tensor:
+
+        res = torch.zeros((self.nwave, self.ncol, self.nlayers, self.nprop), dtype=torch.float64)
+        dens = conc[:, :, self.species_id] * self.mol_weight  # convert to kg/m^3
+        res[:, :, :, 0] = self.properties[:, 1].unsqueeze(1).unsqueeze(2) * dens.unsqueeze(0)
+        ssa = self.properties[:, 2].unsqueeze(1).unsqueeze(2)  # shape: [nwave, 1, 1]
+        ssa = ssa.expand(self.nwave, self.ncol, self.nlayers)   # shape: [nwave, ncol, nlayers]
+        res[:, :, :, 1] = ssa
+        for i in range(self.npmom):
+            #the coefficient of the legendre polynomial for the phase function are the g^i,
+            #we ignore the 0th order, which is always 1 for HG
+            g_power = self.properties[:, 3].unsqueeze(1).unsqueeze(2) ** (i + 1)  # [nwave, 1, 1]
+            g_power = g_power.expand(self.nwave, self.ncol, self.nlayers)         # [nwave, ncol, nlayers]
+            res[:, :, :, 2 + i] = g_power
+        
+        return res
+    
+    
+def read_opacity_file(filename: str) -> torch.Tensor:
+    data = np.genfromtxt(filename, skip_header = 3)
+    return torch.tensor(data, dtype=torch.float64)

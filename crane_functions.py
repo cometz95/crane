@@ -251,10 +251,10 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename):
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename):
     photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm["alt"], options)
+    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename)
 
     dxdt_dict = calc_dxdt(
         photo_dens,

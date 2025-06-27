@@ -56,14 +56,14 @@ species:
 
 opacities:
   H2SO4:
-    type: fourcolumn
-    data: [h2so4.txt]
+    type: jit
+    data: [h2so4.pt]
     species: [H2SO4]
     nmom: 4
 
   S8:
     type: fourcolumn
-    data: [s8_k_fuller.txt]
+    data: [s8_0.1um_optical_constants.txt]
     species: [S8]
     nmom: 4
 
