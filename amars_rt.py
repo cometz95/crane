@@ -412,14 +412,22 @@ class JITAero(torch.nn.Module):
 
         res = torch.zeros((self.nwave, self.ncol, self.nlayers, self.nprop), dtype=torch.float64)
         dens = conc[:, :, self.species_id] * self.mol_weight  # convert to kg/m^3
-        res[:, :, :, 0] = self.properties[:, 1].unsqueeze(1).unsqueeze(2) * dens.unsqueeze(0)
+        attn_coeff = self.properties[:, 1]
+        attn_coeff = torch.where(attn_coeff < 0, torch.tensor(0.0, dtype=attn_coeff.dtype, device=attn_coeff.device), attn_coeff)
+        res[:, :, :, 0] =  attn_coeff.unsqueeze(1).unsqueeze(2) * dens.unsqueeze(0)
+
         ssa = self.properties[:, 2].unsqueeze(1).unsqueeze(2)  # shape: [nwave, 1, 1]
         ssa = ssa.expand(self.nwave, self.ncol, self.nlayers)   # shape: [nwave, ncol, nlayers]
+        ssa = torch.where(ssa > 1, torch.tensor(0.99999, dtype=ssa.dtype, device=ssa.device), ssa)
+        ssa = torch.where(ssa < 0, torch.tensor(1e-20, dtype=ssa.dtype, device=ssa.device), ssa)
         res[:, :, :, 1] = ssa
+        g_array = self.properties[:, 3]
+        g_array = torch.where(g_array < -1, torch.tensor(-0.99, dtype=g_array.dtype, device = g_array.device), g_array)
+        g_array = torch.where(g_array > 1, torch.tensor(0.99, dtype=g_array.dtype, device = g_array.device), g_array)
         for i in range(self.npmom):
             #the coefficient of the legendre polynomial for the phase function are the g^i,
             #we ignore the 0th order, which is always 1 for HG
-            g_power = self.properties[:, 3].unsqueeze(1).unsqueeze(2) ** (i + 1)  # [nwave, 1, 1]
+            g_power = g_array.unsqueeze(1).unsqueeze(2) ** (i + 1)  # [nwave, 1, 1]
             g_power = g_power.expand(self.nwave, self.ncol, self.nlayers)         # [nwave, ncol, nlayers]
             res[:, :, :, 2 + i] = g_power
         

@@ -16,4 +16,4 @@ https://github.com/Nicholaswogan/photochem
 issues:
 
 right now, need to kill amars.py (main) with kill -9 PID
-
+when running multiple processes of the model on one computer (multiple threads), photochem sometimes tries to access and hd5 file at the same time, which causes a crash. to prevent this, type this "export HDF5_USE_FILE_LOCKING=FALSE" before you execute your main

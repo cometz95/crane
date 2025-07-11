@@ -299,11 +299,14 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
 
 def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options):
     Tmin = 100
+    Tmax = 500
     atm["temp"] += dTdt_atm * dt_dyn
     # Check for clamping
     if torch.any(atm["temp"] < Tmin):
         print(f"Warning: Atmospheric temperature was clamped to a minimum of {Tmin} K")
-    atm["temp"] = torch.clamp(atm["temp"], min=Tmin)
+    if torch.any(atm["temp"] > Tmax):
+        print(f"Warning: Atmospheric temperature was clamped to a minimum of {Tmax} K")
+    atm["temp"] = torch.clamp(atm["temp"], min=Tmin, max=Tmax)
 
     atm["pres"] = calc_pressure_atm_tensor(atm, options)
 

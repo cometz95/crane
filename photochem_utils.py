@@ -317,7 +317,7 @@ def make_atmosphere_z_grid_from_yaml(yaml_path):
 
 #ASSUMES ALL SPECIES PASSED IN ARE 0 BESIDES H2O, WHICH IS AT SATURATION AT INITIAL TEMP
 #pres input is in pa
-def initialize_species_profiles(species_keys, temp, pres, condensate_properties, blank_value=1e-40):
+def initialize_species_profiles(species_keys, temp, pres, condensate_properties, aero_new_radius, blank_value=1e-40):
     n_layers = len(temp)
     species_profiles = {}
     blank_array = np.full(n_layers, blank_value)
@@ -327,11 +327,13 @@ def initialize_species_profiles(species_keys, temp, pres, condensate_properties,
             species_profiles[key] = condensate_properties.saturation_data.sat_pressure(temp) / pres
         elif key.upper() == "CO2":
             species_profiles[key] = 1 - species_profiles["H2O"]
+        elif key.lower().endswith("_r"):
+            species_profiles[key] = np.full(n_layers, aero_new_radius)
         else:
             species_profiles[key] = blank_array.copy()
     return species_profiles
 
-def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, species_keys, water_condensate_properties):
+def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, species_keys, water_condensate_properties, aero_new_radius):
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
     # Compute new altitude grid at layer centers
@@ -356,7 +358,7 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
     }
 
     #converting p from dynes/cm^2 to Pa
-    species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, blank_value=1e-40)
+    species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, aero_new_radius, blank_value=1e-40)
 
     for species, profile in species_profiles.items():
         updates[species] = profile
