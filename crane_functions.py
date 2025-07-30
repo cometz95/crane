@@ -297,23 +297,38 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
             print(f"Warning: {photo_key} or {harp_key} not found in dxdt_dict or atm.")
     return x_atm_all, atm
 
-def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options):
+def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff):
     Tmin = 100
     Tmax = 500
     atm["temp"] += dTdt_atm * dt_dyn
+    #dt_min_atm = torch.min(torch.abs(atm["temp"] / dTdt_atm))
+
+    alt = atm["alt"]
+    temp = atm["temp"]
+    alts_above_limit = (alt[0, :] > dyn_T_cutoff)
+    idx_of_limit = torch.argmin(torch.abs(alt[0, :] - dyn_T_cutoff))
+    temp_at_limit = temp[0, idx_of_limit]
+    # Set temp above 50 km to temp_50km
+    temp[0, alts_above_limit] = temp_at_limit
+
     # Check for clamping
     if torch.any(atm["temp"] < Tmin):
         print(f"Warning: Atmospheric temperature was clamped to a minimum of {Tmin} K")
     if torch.any(atm["temp"] > Tmax):
-        print(f"Warning: Atmospheric temperature was clamped to a minimum of {Tmax} K")
+        print(f"Warning: Atmospheric temperature was clamped to a maximum of {Tmax} K")
     atm["temp"] = torch.clamp(atm["temp"], min=Tmin, max=Tmax)
 
     atm["pres"] = calc_pressure_atm_tensor(atm, options)
 
     bc["btemp"] += dTdt_surf * dt_dyn
+    #dt_min_surf = torch.min(torch.abs(bc["btemp"] / dTdt_surf))
+
     if torch.any(bc["btemp"] < Tmin):
         print(f"Warning: Surface temperature was clamped to a minimum of {Tmin} K")
-    bc["btemp"] = torch.clamp(bc["btemp"], min=Tmin)
+    if torch.any(bc["btemp"] > Tmax):
+        print(f"Warning: Surface temperature was clamped to a maximum of {Tmax} K")
+    bc["btemp"] = torch.clamp(bc["btemp"], min=Tmin, max = Tmax)
+
     return atm, bc
 
 def init_from_file(photo_filename, options, z_levels_km):

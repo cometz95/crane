@@ -8,6 +8,16 @@ from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
 from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
 from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles
 
+def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
+    true_dTdt_atm = (new_temps - old_temps)/dt_dyn
+    dt_min_atm = torch.min(torch.abs(new_temps / true_dTdt_atm))
+
+    dt_min_surf = torch.min(torch.abs(btemp / dTdt_surf))
+    
+    dt_min = torch.min(dt_min_atm, dt_min_surf)
+
+    return dt_min
+
 if __name__ == "__main__":
     case_name = 'aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur'
 
@@ -38,6 +48,7 @@ if __name__ == "__main__":
     upper_init_lapserate = 0
     Tsurf_init = 288
     Tmin_upper = 190
+    dyn_T_cutoff = 50000 #cutoff T evolution at this altitude
 
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
     photo_settings_yaml_filename = 'settings.yaml'
@@ -52,8 +63,10 @@ if __name__ == "__main__":
     dt_dyn = 86400.0/4      #seconds
     dt_rad = dt_dyn
     dt_photo = dt_dyn
+    dt_lower_lim = dt_dyn
     t_lim = dt_dyn*4*365*10     #length of time to run the model for, in seconds
     writeout_step = 1
+    dyn_timestep_safety_factor = 100
 
     #names of species we are about for RT and condensation, length must match options.nspecies
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
@@ -103,34 +116,36 @@ if __name__ == "__main__":
     #fig, axs = plt.subplots(1, 3, figsize=(12, 4), dpi=100)
     #precip_rate_list = []
 
+    atm_old_temps = copy.deepcopy(atm)
+
     while tot_time < t_lim:
         #each step proceeds in this order:
         #call radiation, do heating
         #call photochem, update mixing ratios (setting initial condensate mixing ratio before convective adjustment)
         #then do convective adjustment, and calc precip due to cooling
-        if step % int(dt_rad // dt_dyn) == 0:
-            netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options)
-            dTdt_atm, dTdt_surf = calc_dTdt(
-                netflux=netflux,
-                downward_flux=downward_flux,
-                atm=atm,
-                bc=bc,
-                options=options,
-                shared=shared)
+        netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options)
+        dTdt_atm, dTdt_surf = calc_dTdt(
+            netflux=netflux,
+            downward_flux=downward_flux,
+            atm=atm,
+            bc=bc,
+            options=options,
+            shared=shared)
 
-        atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options)
+        atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff)
         #atm_before_convadj = copy.deepcopy(atm)
 
-        if step % int(dt_photo // dt_dyn) == 0:
-            photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
-            dxdt_dict = calc_dxdt(
-                photo_dens,
-                photo_binary_filename,
-                photo_intermediate_filename,
-                dt_photo
-            )
+        photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename)
+        dxdt_dict = calc_dxdt(
+            photo_dens,
+            photo_binary_filename,
+            photo_intermediate_filename,
+            dt_dyn
+        )
         x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_alt_grid, options)
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
+        dt_min = calc_dyn_tempstep(bc["btemp"], dTdt_surf, atm_old_temps["temp"], atm["temp"], dt_dyn)
+        atm_old_temps = copy.deepcopy(atm)
         #atm_after_convadj = copy.deepcopy(atm)
         #precip_rate_list.append(precip_rate)
         #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs, options)
@@ -151,6 +166,9 @@ if __name__ == "__main__":
                 switch_index += 1
                 photo_settings_yaml_filename = photo_settings_yaml_filenames[switch_index]
 
+        dt_dyn = dt_min / dyn_timestep_safety_factor
+        if dt_dyn < dt_lower_lim:
+            dt_dyn = dt_lower_lim
         #print(step)
         #print('precip rate: ',precip_rate)
 
