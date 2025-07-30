@@ -333,7 +333,35 @@ def initialize_species_profiles(species_keys, temp, pres, condensate_properties,
             species_profiles[key] = blank_array.copy()
     return species_profiles
 
-def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, species_keys, water_condensate_properties, aero_new_radius):
+
+#ASSUMES ALL SPECIES PASSED IN ARE 0 BESIDES H2O, WHICH IS AT SATURATION AT INITIAL TEMP, and CO2
+#pres input is in pa
+def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensate_properties, aero_new_radius, default_aero_radius, blank_value=1e-40):
+    n_layers = len(temp)
+    species_profiles = {}
+    blank_array = np.full(n_layers, blank_value)
+
+    for key in all_keys:
+        if key in ["alt", "temp", "press", "den", "eddy"]:
+            continue
+        if key not in keys_to_init:
+            if key.lower().endswith("_r"):
+                species_profiles[key] = np.full(n_layers, default_aero_radius)
+            else:
+                species_profiles[key] = blank_array.copy()
+
+    for key in keys_to_init:
+        if key.upper() == "H2O":
+            # Initialize H2O to saturation mixing ratio profile
+            species_profiles[key] = condensate_properties.saturation_data.sat_pressure(temp) / pres
+        elif key.lower().endswith("_r"):
+            species_profiles[key] = np.full(n_layers, aero_new_radius)
+    if "CO2" in [k.upper() for k in keys_to_init]:
+        species_profiles["CO2"] = 1 - species_profiles["H2O"]
+
+    return species_profiles
+
+def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius):
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
     # Compute new altitude grid at layer centers
@@ -354,11 +382,14 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
         "alt": z_centers,
         "temp": temp,
         "press": p/1e6, #convert dynes/cm^2 to bar
-        "den": dens
+        "den": dens,
+        "eddy": np.ones_like(dens) * kzz
     }
 
     #converting p from dynes/cm^2 to Pa
-    species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, aero_new_radius, blank_value=1e-40)
+    #species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, aero_new_radius, blank_value=1e-40)
+    all_keys = old_chem_atmosphere_data.keys()
+    species_profiles = initialize_species_profiles_to0(all_keys, keys_to_init, temp, p/10, water_condensate_properties, aero_new_radius, default_aero_radius, blank_value=1e-40)
 
     for species, profile in species_profiles.items():
         updates[species] = profile
