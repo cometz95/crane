@@ -105,7 +105,7 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
     rad = Radiation(rad_op)
     return rad, bc
 
-def calc_amars_rt(rad, atm, bc, options):
+def calc_amars_rt(rad, atm, bc, options, condensate_harp_key):
     dz = atm["dz"]
         
     ncol, nlyr = atm["alt"].shape
@@ -114,7 +114,7 @@ def calc_amars_rt(rad, atm, bc, options):
     conc = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
     conc[:, :, 0] = atm["xCO2"]
     conc[:, :, 1] = atm["xH2O"]
-    conc[:, :, 2] = atm["xSO2"]
+    conc[:, :, 2] = atm[condensate_harp_key]
     conc[:, :, 3] = atm["xH2SO4aer"] * options.aerosol_scale_factor
     conc[:, :, 4] = atm["xS8aer"]  * options.aerosol_scale_factor
 

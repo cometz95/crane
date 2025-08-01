@@ -251,7 +251,7 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename):
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key):
     photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
     rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename)
@@ -263,7 +263,7 @@ def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filen
         dt_photo
     )
 
-    netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options)
+    netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options, condensate_harp_key)
 
     dTdt_atm, dTdt_surf = calc_dTdt(
         netflux=netflux,
@@ -276,7 +276,7 @@ def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filen
 
     return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc
 
-def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_alt_grid, options):
+def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_alt_grid):
 
     # 1. Update all mixing ratios in x_atm_all
     for key in x_atm_all:
@@ -293,13 +293,15 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
                 x_atm_all[photo_key].squeeze().cpu().numpy()
             )
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)  # shape [1, nlyr]
+            print('atm H2SO4aer: ', atm['xH2SO4aer'])
+            print('x atm all: ', x_atm_all['H2SO4aer'])
         else:
             print(f"Warning: {photo_key} or {harp_key} not found in dxdt_dict or atm.")
     return x_atm_all, atm
 
 def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff):
     Tmin = 100
-    Tmax = 500
+    Tmax = 400
     atm["temp"] += dTdt_atm * dt_dyn
     #dt_min_atm = torch.min(torch.abs(atm["temp"] / dTdt_atm))
 
@@ -308,7 +310,7 @@ def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, optio
     alts_above_limit = (alt[0, :] > dyn_T_cutoff)
     idx_of_limit = torch.argmin(torch.abs(alt[0, :] - dyn_T_cutoff))
     temp_at_limit = temp[0, idx_of_limit]
-    # Set temp above 50 km to temp_50km
+    # Set temp above alt limit to tempat alt limit
     temp[0, alts_above_limit] = temp_at_limit
 
     # Check for clamping
@@ -331,7 +333,7 @@ def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, optio
 
     return atm, bc
 
-def init_from_file(photo_filename, options, z_levels_km):
+def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
     """
     Initialize atmospheric state from a photochem file.
 
@@ -372,7 +374,7 @@ def init_from_file(photo_filename, options, z_levels_km):
         "temp": temp,
         "xCO2": xfrac[:, :],
         "xH2O": xfrac[:, :],
-        "xSO2": xfrac[:, :],
+        condensate_harp_key: xfrac[:, :],
         "xH2SO4aer": xfrac[:, :],
         "xS8aer": xfrac[:, :]
     }

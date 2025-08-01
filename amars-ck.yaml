@@ -69,17 +69,17 @@ opacities:
 
   CO2:
     type: rfm-ck
-    data: [amars-ck-<band>.nc]
+    data: [ck-so2-0.5bar-<band>.nc]
     species: [CO2]
 
   H2O:
     type: rfm-ck
-    data: [amars-ck-<band>.nc]
+    data: [ck-so2-0.5bar-<band>.nc]
     species: [H2O]
 
   SO2:
     type: rfm-ck
-    data: [amars-ck-<band>.nc]
+    data: [ck-so2-0.5bar-<band>.nc]
     species: [SO2]
 
 bands: [SW, B1, B2, B3, B4, B5, B6, B7, B8]

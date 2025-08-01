@@ -192,6 +192,7 @@ def plot_chem_each_timestep_alt(pc, options, photo_info):
             mix = [pc.var.cond_params[ind].RHc*saturation(T)/pc.wrk.pressure[j] for j,T in enumerate(pc.var.temperature)]
             ax2.plot(mix, photo_alt_grid, c='C'+str(i), ls='--', alpha=0.7)
 
+    print('sol H2so4 aer: ',sol['H2SO4aer'])
     ax2.set_xscale('log')
     #ax2.set_yscale('log')
     #ax2.invert_yaxis()
@@ -357,7 +358,12 @@ def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensa
         elif key.lower().endswith("_r"):
             species_profiles[key] = np.full(n_layers, aero_new_radius)
     if "CO2" in [k.upper() for k in keys_to_init]:
-        species_profiles["CO2"] = 1 - species_profiles["H2O"]
+        # Subtract all initialized species except those ending with _r and CO2 itself
+        subtract = np.zeros(n_layers)
+        for k in keys_to_init:
+            if k.upper() != "CO2" and not k.lower().endswith("_r"):
+                subtract += species_profiles[k]
+        species_profiles["CO2"] = 1 - subtract
 
     return species_profiles
 

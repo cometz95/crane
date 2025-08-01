@@ -3,6 +3,8 @@ import shutil
 import pandas as pd
 import copy
 import torch
+import numpy as np
+import os
 
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
 from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
@@ -16,21 +18,21 @@ def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
     
     dt_min = torch.min(dt_min_atm, dt_min_surf)
 
-    return dt_min
+    return dt_min.item()
 
 if __name__ == "__main__":
     case_name = 'aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur'
 
     options = RadiationModelOptions(
         ncol=1,
-        nlyr=80,
+        nlyr=100,
         nstr = 4,
         grav=3.711,  # Gravitational acceleration on Mars
         mean_mol_weight=0.044,  # Mean molecular weight of CO2 (kg/mol)
         cv=658,  # Specific heat capacity of CO2 (J/(kg K)) at const volume
-        aerosol_scale_factor = 0.1,  # Aerosol scaling factor
+        aerosol_scale_factor = 1.0,  # Aerosol scaling factor
         cSurf=200000,  # Surface thermal inertia (J/(m^2 K))
-        kappa=2.0e-10,  # Thermal diffusivity (m^2/s)
+        kappa=2.0e-3,  # Thermal diffusivity (m^2/s)
         surf_sw_albedo = 0.3,
         sr_sun = 2.92842e-5,
         btemp0 = 240,
@@ -59,6 +61,9 @@ if __name__ == "__main__":
 
     shared = {}
     do_plot = True #if True, plots the atmosphere at each timestep
+    outdir_name = 'outputs'
+    if not os.path.exists(outdir_name):
+        os.makedirs(outdir_name)
 
     #for now, make the timesteps all equal
     # otherwise, the code is setup so that dt_rad and dt_photo must be multiples of dt_dyn
@@ -103,15 +108,15 @@ if __name__ == "__main__":
     water_condensate_properties = load_particle_info("H2Oaer", "zahnle_amars.yaml")
     z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius)
     shutil.copy(photo_init_filename, photo_intermediate_filename)
-    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename)
+    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key) # Load the initial atmosphere from the photochem file
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key)
 
     step = 0
     switch_index = 0
 
     #can switch the photochem boundary conditions after a certain amount of time
     do_switching_pchem_bc = True
-    times_to_switch =[1.577e8, t_lim + 1e8]
+    times_to_switch =[t_lim + 1e8, t_lim + 1e9]
     photo_settings_yaml_filenames = ['settings.yaml', 'settings2.yaml']
     tot_time = 0.0
 
@@ -126,7 +131,7 @@ if __name__ == "__main__":
         #call radiation, do heating
         #call photochem, update mixing ratios (setting initial condensate mixing ratio before convective adjustment)
         #then do convective adjustment, and calc precip due to cooling
-        netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options)
+        netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options, condensate_harp_key)
         dTdt_atm, dTdt_surf = calc_dTdt(
             netflux=netflux,
             downward_flux=downward_flux,
@@ -145,7 +150,8 @@ if __name__ == "__main__":
             photo_intermediate_filename,
             dt_dyn
         )
-        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_alt_grid, options)
+
+        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_alt_grid)
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
         dt_min = calc_dyn_tempstep(bc["btemp"], dTdt_surf, atm_old_temps["temp"], atm["temp"], dt_dyn)
         atm_old_temps = copy.deepcopy(atm)
@@ -154,12 +160,25 @@ if __name__ == "__main__":
         #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs, options)
         
         if step % writeout_step == 0:
-            outputs["tot_time"].append(tot_time)
-            outputs["surface_temp"].append(bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"])
-            outputs["precip_rate"].append(precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
-            outputs["atm"].append(copy.deepcopy(atm))
-            df = pd.DataFrame(outputs)
-            df.to_csv(outputs_intermediate_name, index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
+            step_filename = "output_" + f"{case_name}_{step}.csv"
+
+            # Choose a reference length from one of the atm arrays
+            ref_len = next(iter(atm.values())).numel() if hasattr(next(iter(atm.values())), "numel") else len(next(iter(atm.values())))
+
+            # Prepare output_dict, filling single values to match ref_len
+            output_dict = {
+                "tot_time": np.full(ref_len, tot_time),
+                "surface_temp": np.full(ref_len, bc["btemp"].item() if hasattr(bc["btemp"], "item") else bc["btemp"]),
+                "precip_rate": np.full(ref_len, precip_rate.item() if hasattr(precip_rate, "item") else precip_rate)
+            }
+
+            for key, arr in atm.items():
+                arr_np = arr.detach().cpu().numpy().flatten() if hasattr(arr, "detach") else np.array(arr).flatten()
+                output_dict[key] = arr_np
+
+            # Build DataFrame and save
+            df_step = pd.DataFrame(output_dict)
+            df_step.to_csv(outdir_name + '/' + step_filename, index=False, float_format="%.6g")
 
         tot_time += dt_dyn
         step += 1
