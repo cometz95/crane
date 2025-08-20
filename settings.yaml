@@ -24,7 +24,8 @@ particles:
 - {name: H2Saer, RH-condensation: 1}
 - {name: S8aer, RH-condensation: 1}
 - {name: H2SO4aer, RH-condensation: 1}
-- {name: CO2aer, RH-condensation: 1}  
+- {name: CO2aer, RH-condensation: 1} 
+- {name: S2aer, RH-condensation: 1} 
 # Specifies boundary conditions. If a species is not specified, then
 # the model assumes zero-flux boundary conditions at the top and
 # bottom of the atmosphere
@@ -51,7 +52,7 @@ boundary-conditions:
   lower-boundary: {type: press, press: 0.11}
   upper-boundary: {type: veff, veff: 0.0}
 - name: HCl
-  lower-boundary: {type: press, press: 2.5e-4}
+  lower-boundary: {type: press, press: 1.2e5}
   upper-boundary: {type: veff, veff: 0.0}
 - name: O1D
   type: short lived

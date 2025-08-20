@@ -7,8 +7,8 @@ import numpy as np
 import os
 
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
-from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment
-from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles
+from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment, compute_molecules_per_particle, make_radius_dict
+from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles, update_p_dens, update_atm_x
 
 def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
     true_dTdt_atm = (new_temps - old_temps)/dt_dyn
@@ -42,7 +42,7 @@ if __name__ == "__main__":
         nspecies = 5,
         coszen = 1,
         nswbin = 200,
-        pbot = 0.53
+        pbot = 0.53 #bars, init guess
     )
 
     #init T profile stuff
@@ -50,14 +50,16 @@ if __name__ == "__main__":
     upper_init_lapserate = 0
     Tsurf_init = 288
     Tmin_upper = 190
-    dyn_T_cutoff = 50000 #cutoff T evolution at this altitude
-    kzz=1e5
-    default_aero_radius=1e-5
+    dyn_T_cutoff = 100000 #m cutoff T evolution at this altitude
+    kzz=1e5 #cm^2/s
+    default_aero_radius=1e-5 # incm
+    aero_new_radius = 1e-5 #cm
+    particles_with_new_radius = ['H2SO4aer_r']
 
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
     photo_settings_yaml_filename = 'settings.yaml'
-    h2so4_opacity_filename = "h2so4_0.1um_optical_constants.txt"
-    s8_opacity_filename = "s8_0.1um_optical_constants.txt"
+    h2so4_opacity_filename = "h2so4_mieparams_r0.1um.txt"
+    s8_opacity_filename = "s8_mieparams_r0.1um.txt"
 
     shared = {}
     do_plot = True #if True, plots the atmosphere at each timestep
@@ -78,6 +80,9 @@ if __name__ == "__main__":
     #names of species we are about for RT and condensation, length must match options.nspecies
     pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
+    radius_dict = make_radius_dict("zahnle_amars.yaml", particles_with_new_radius, default_aero_radius, aero_new_radius)
+    molec_per_particle_dict = compute_molecules_per_particle("zahnle_amars.yaml", radius_dict)
+    
     condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
     condensate_harp_key = 'xSO2'
 
@@ -102,20 +107,20 @@ if __name__ == "__main__":
         "atm": []
     }
 
-    aero_new_radius = 1e-5
     #species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer','SO','O','S','H2S','CO2','CO2aer','S8','S8aer']
-    keys_to_init = ['CO2', 'H2O', 'H2SO4aer_r']
+    keys_to_init = ['CO2', 'H2O'] + particles_with_new_radius
     water_condensate_properties = load_particle_info("H2Oaer", "zahnle_amars.yaml")
     z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius)
     shutil.copy(photo_init_filename, photo_intermediate_filename)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius)
+    atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all)
 
     step = 0
     switch_index = 0
 
     #can switch the photochem boundary conditions after a certain amount of time
-    do_switching_pchem_bc = True
+    do_switching_pchem_bc = False
     times_to_switch =[t_lim + 1e8, t_lim + 1e9]
     photo_settings_yaml_filenames = ['settings.yaml', 'settings2.yaml']
     tot_time = 0.0
@@ -143,7 +148,7 @@ if __name__ == "__main__":
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff)
         #atm_before_convadj = copy.deepcopy(atm)
 
-        photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename)
+        photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename)
         dxdt_dict = calc_dxdt(
             photo_dens,
             photo_binary_filename,
@@ -155,6 +160,9 @@ if __name__ == "__main__":
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
         dt_min = calc_dyn_tempstep(bc["btemp"], dTdt_surf, atm_old_temps["temp"], atm["temp"], dt_dyn)
         atm_old_temps = copy.deepcopy(atm)
+
+        atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all)
+        atm = update_atm_x(atm, pchem_species_dict, harp_species_dict, photo_intermediate_filename)
         #atm_after_convadj = copy.deepcopy(atm)
         #precip_rate_list.append(precip_rate)
         #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs, options)

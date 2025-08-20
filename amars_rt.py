@@ -48,7 +48,7 @@ class RadiationModelOptions:
         self.pbot = pbot
 
 
-def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename):
+def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius):
     ncol, nlyr = alt.shape
     bc = {}
 
@@ -80,16 +80,18 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
             bc[name + "/umu0"] = options.coszen * ones((ncol,), dtype=torch.float64)
             #h2so4
             h2so4_species_id = 3
+            aero_rad_meters = aero_new_radius/100
             h2so4_species_mol_weight = 0.098
             model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band.ww())
             scripted = torch.jit.script(model)
             scripted.save("h2so4.pt")
+
             #s8
-            #s8_species_id = 4
-            #s8_species_mol_weight = 0.256
-            #model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band.ww())
-            #scripted = torch.jit.script(model)
-            #scripted.save("s8.pt")
+            s8_species_id = 4
+            s8_species_mol_weight = 0.256
+            model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band.ww())
+            scripted = torch.jit.script(model)
+            scripted.save("s8.pt")
 
         else:  # longwave
             #band.ww(band.query_weights())
@@ -109,7 +111,6 @@ def calc_amars_rt(rad, atm, bc, options, condensate_harp_key):
     dz = atm["dz"]
         
     ncol, nlyr = atm["alt"].shape
-    pressure = calc_pressure_atm_tensor(atm, options)
 
     conc = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
     conc[:, :, 0] = atm["xCO2"]
@@ -118,7 +119,7 @@ def calc_amars_rt(rad, atm, bc, options, condensate_harp_key):
     conc[:, :, 3] = atm["xH2SO4aer"] * options.aerosol_scale_factor
     conc[:, :, 4] = atm["xS8aer"]  * options.aerosol_scale_factor
 
-    conc *= pressure.unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
+    conc *= atm['pres'].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
     netflux, downward_flux, upward_flux = rad.forward(conc, dz, bc, atm)
 
     return netflux, downward_flux, upward_flux
@@ -126,8 +127,6 @@ def calc_amars_rt(rad, atm, bc, options, condensate_harp_key):
 def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
 
     dz = atm["dz"]
-
-    pressure = calc_pressure_atm_tensor(atm, options)
 
     # Add thermal diffusion flux
     vec = list(atm["temp"].size())
@@ -150,7 +149,7 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
     shared["result/dTdt_surf"] = dTdt_surf
 
     # Density (rho)
-    rho = (pressure * options.mean_mol_weight) / \
+    rho = (atm['pres'] * options.mean_mol_weight) / \
           (constants.Rgas * atm["temp"])
 
     # Density at levels

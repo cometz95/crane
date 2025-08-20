@@ -20,6 +20,8 @@ k4thOrder = 4
 kExtrapolate = 0
 kConstant = 1
 
+kb_cgs = 1.380649e-16  # Boltzmann constant in erg/K
+
 import os
 import contextlib
 
@@ -192,7 +194,6 @@ def plot_chem_each_timestep_alt(pc, options, photo_info):
             mix = [pc.var.cond_params[ind].RHc*saturation(T)/pc.wrk.pressure[j] for j,T in enumerate(pc.var.temperature)]
             ax2.plot(mix, photo_alt_grid, c='C'+str(i), ls='--', alpha=0.7)
 
-    print('sol H2so4 aer: ',sol['H2SO4aer'])
     ax2.set_xscale('log')
     #ax2.set_yscale('log')
     #ax2.invert_yaxis()
@@ -260,7 +261,7 @@ def config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
 
 def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename):
-    photo_dens = update_photochem_all(photo_intermediate_filename, atm, x_atm_all, options)
+    update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename)
     photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
     photo_alt_grid = photo_atm_data["alt"]
 
@@ -294,7 +295,42 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
     #need to modify the enclosing function argument to pass fig and axs before using the below rh plotter
     #plot_rh_each_timestep(pc, fig, axs)
 
-    return photo_dens, photo_alt_grid
+    #pc.out2atmosphere(photo_intermediate_filename)
+
+    return photo_alt_grid
+
+def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename):
+
+    pc = EvoAtmosphere(
+    'zahnle_amars.yaml',
+    photo_settings_yaml_filename,
+    'Sun_3.5Ga_s0_4.txt',
+    photo_intermediate_filename
+    )
+
+    pc.var.verbose = 1
+    pc.var.atol = 1e-18
+    pc.var.autodiff = True
+    pc.var.upwind_molec_diff = True
+
+    # Change particle free params
+    for i in range(pc.dat.np):
+        pc.var.cond_params[i].smooth_factor = 10 # Bigger numbers help integration converge.
+        pc.var.cond_params[i].k_evap = 0 # Evaporation rate constant
+        pc.var.cond_params[i].k_cond = 10000 # Condensation rate constant
+
+    tstart = 0.0
+    #evolve the atmosphere by dt_photo seconds
+    with suppress_fortran_output():
+        pc.evolve(photo_binary_filename, tstart, pc.wrk.usol, np.array([dt_photo]), overwrite=True)
+
+    print(dir(pc.var))
+    print(dir(pc.wrk))
+
+    #dens_hydro = pc.wrk.pressure/(pc.var.temperature * kb_cgs)
+    dens_hydro = pc.wrk.density
+
+    return dens_hydro
 
 def make_atmosphere_z_grid_from_yaml(yaml_path):
     # Load YAML
@@ -382,6 +418,7 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
 
     z_centers_tensor = torch.from_numpy(z_centers).unsqueeze(0).to(torch.float64)
     temp_tensor = torch.from_numpy(temp).unsqueeze(0).to(torch.float64)
+    #the below is essentially only used as a guess for calculating total atmospheric mass
     p, dens = calc_p_den_scaleheight(z_centers_tensor, temp_tensor, options)
 
     updates = {
@@ -408,7 +445,7 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
 
     return z_levels
 
-def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, options):
+def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, photo_settings_yaml_filename):
     #need to write pchem zgrid the first time before this is called
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
@@ -419,14 +456,28 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, option
         new_atm["temp"].squeeze().cpu().numpy() # Convert to 1D array
     )
 
-    alt_tensor = torch.tensor(old_chem_atmosphere_data["alt"], dtype=torch.float64).unsqueeze(0)
-    new_temp_tensor = torch.from_numpy(new_temp).unsqueeze(0).to(torch.float64)
-    pressure, density = calc_p_den_scaleheight(alt_tensor, new_temp_tensor, options)
+    
+    updates = {
+        "temp": new_temp
+    }
+    modify_atmospheric_parameters(old_chem_atmosphere_data, updates, output_filepath=photo_intermediate_filename) 
+
+    pc = EvoAtmosphere(
+        'zahnle_amars.yaml',
+        photo_settings_yaml_filename,
+        'Sun_3.5Ga_s0_4.txt',
+        photo_intermediate_filename
+    )
+
+    '''
+    p_pchem = pc.wrk.pressure
+    dens_hydro = pc.wrk.pressure/(new_temp * kb_cgs)
+
 
     updates = {
         "temp": new_temp,
-        "den": density,
-        "press": pressure / 1e6  # Convert to bar
+        "den": dens_hydro,
+        "press": p_pchem
     }
 
     # Directly update all species in x_atm_all (no interpolation needed)
@@ -440,8 +491,9 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, option
                 print(f"Warning: Length mismatch for {key}, skipping update.")
 
     modify_atmospheric_parameters(old_chem_atmosphere_data, updates, output_filepath=photo_intermediate_filename) 
+    '''
 
-    return density
+    pc.out2atmosphere_txt(photo_intermediate_filename,overwrite=True)
 
 def calc_dxdt(photo_den, photo_binary_filename, photo_intermediate_filename, dt_photo):
     """
@@ -454,7 +506,6 @@ def calc_dxdt(photo_den, photo_binary_filename, photo_intermediate_filename, dt_
 
     # Read the photochem binary file
     sol = evo_read_evolve_output(photo_binary_filename)
-
     # Extract all species names from the binary file
     species_names = sol['species_names']
 
@@ -471,6 +522,7 @@ def calc_dxdt(photo_den, photo_binary_filename, photo_intermediate_filename, dt_
             dxdt_dict[key] = torch.tensor(dxdt_i).unsqueeze(0)  # shape [1, nlyr]
 
     return dxdt_dict
+
 
 def load_atmosphere_file(filepath):
 
@@ -691,6 +743,62 @@ def test_whats_going_on(photo_binary_filename, photo_keys):
         usol_values = sol['usol'][index, :, -1]  # Extract the last time step for the species
         updates_photo[key] = usol_values
         print(f"{key}: {usol_values}")
+
+def update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all):
+
+    update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename)
+
+    pc = EvoAtmosphere(
+        'zahnle_amars.yaml',
+        photo_settings_yaml_filename,
+        'Sun_3.5Ga_s0_4.txt',
+        photo_intermediate_filename
+    )
+
+    p_pchem = pc.wrk.pressure
+    #dens_hydro = pc.wrk.pressure/(pc.var.temperature * kb_cgs)
+    dens_hydro = pc.wrk.density
+
+    photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
+    photo_alt_grid = photo_atm_data["alt"]
+
+    new_p_on_atm = np.interp(atm['alt'].squeeze().numpy()/1000,
+        photo_alt_grid,
+        p_pchem
+    )    
+
+    new_dens_on_atm = np.interp(atm['alt'].squeeze().numpy()/1000,
+        photo_alt_grid,
+        dens_hydro
+    )
+
+    atm['pres'] = torch.tensor(new_p_on_atm.copy()).unsqueeze(0)/10
+
+    '''
+    updates = {
+        "den": dens_hydro,
+        "press": p_pchem
+    }
+
+    modify_atmospheric_parameters(photo_atm_data, updates, output_filepath=photo_intermediate_filename) 
+    '''
+
+    pc.out2atmosphere_txt(photo_intermediate_filename,overwrite=True)
+    
+    return atm, new_dens_on_atm, dens_hydro, p_pchem
+
+def update_atm_x(atm, photo_keys, harp_keys, photo_intermediate_filename):
+    photo_data = load_atmosphere_file(photo_intermediate_filename)
+
+    for photo_key, harp_key in zip(photo_keys, harp_keys):
+        interpolated_values = np.interp(
+            (atm["alt"]/1e3).squeeze().cpu().numpy(),
+            photo_data['alt'],
+            photo_data[photo_key]
+        )
+        atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)  # shape [1, nlyr]
+
+    return atm
 
 # Example usage
 if __name__ == "__main__":

@@ -9,13 +9,14 @@ import re
 import pandas as pd
 
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions, layer2level_1var, calc_pressure_atm_tensor
-from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
+from photochem_utils import calc_dxdt, run_photochem_init, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
 
 Rgas_SI = 8.314462618  # J/(mol K)
 k2ndOrder = 2
 k4thOrder = 4
 kExtrapolate = 0
 kConstant = 1
+N_avo = 6.022e23
 
 def cgs_to_si_pressure(p_cgs):
     return p_cgs * 0.1  # dyn/cm² to Pa
@@ -237,6 +238,21 @@ class SpeciesInfo:
                 f"gas_phase={self.gas_phase!r}, saturation_data={self.saturation_data is not None}, "
                 f"cp_model={self.cp_model is not None})")
 
+def load_all_particle_info(yaml_filename):
+    with open(yaml_filename, "r") as f:
+        data = yaml.safe_load(f)
+
+    species_list = data.get('species', [])
+    particle_dict = {}
+
+    for particle in data.get('particles', []):
+        name = particle.get('name')
+        if not name:
+            continue  # skip unnamed particles
+        particle_dict[name] = SpeciesInfo(particle, species_list)
+
+    return particle_dict
+
 def load_particle_info(particle_name, yaml_filename):
     with open(yaml_filename, "r") as f:
         data = yaml.safe_load(f)
@@ -251,10 +267,51 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key):
-    photo_dens, photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
+def compute_molecules_per_particle(yaml_filename, radius_dict):
+    particle_info_dict = load_all_particle_info(yaml_filename)
+    result = {}
+
+    for name, info in particle_info_dict.items():
+        if name not in radius_dict:
+            raise ValueError(f"No radius provided for particle '{name}'")
+
+        radius = radius_dict[name]
+        density = info.density  # kg/m³
+        # Try to get mu in kg/mol
+        if info.saturation_data is not None and hasattr(info.saturation_data, "mu"):
+            mu = info.saturation_data.mu
+        else:
+            mu = 74e-3  # default: 74 g/mol → 0.074 kg/mol, for HCaer1 which is what we're missing it for
+
+        molecules_per_particle = (
+            (4.0 / 3.0) * np.pi * (radius ** 3) * density * (1 / mu) * N_avo
+        )
+
+        result[name] = molecules_per_particle
+
+    return result
+
+def make_radius_dict(yaml_filename, particles_with_new_radius, default_aero_radius, aero_new_radius):
+
+    particle_info_dict = load_all_particle_info(yaml_filename)
+
+    particles_with_new_radius = [p[:-2] if p.endswith("_r") else p for p in particles_with_new_radius]
+
+    CM_TO_M = 1e-2
+
+    radius_dict = {}
+    for name in particle_info_dict.keys():
+        if name in particles_with_new_radius:
+            radius_dict[name] = aero_new_radius * CM_TO_M
+        else:
+            radius_dict[name] = default_aero_radius * CM_TO_M
+
+    return radius_dict
+
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius):
+    photo_dens = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename)
+    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius)
 
     dxdt_dict = calc_dxdt(
         photo_dens,
@@ -293,8 +350,6 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
                 x_atm_all[photo_key].squeeze().cpu().numpy()
             )
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)  # shape [1, nlyr]
-            print('atm H2SO4aer: ', atm['xH2SO4aer'])
-            print('x atm all: ', x_atm_all['H2SO4aer'])
         else:
             print(f"Warning: {photo_key} or {harp_key} not found in dxdt_dict or atm.")
     return x_atm_all, atm
@@ -320,7 +375,7 @@ def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, optio
         print(f"Warning: Atmospheric temperature was clamped to a maximum of {Tmax} K")
     atm["temp"] = torch.clamp(atm["temp"], min=Tmin, max=Tmax)
 
-    atm["pres"] = calc_pressure_atm_tensor(atm, options)
+    #atm["pres"] = calc_pressure_atm_tensor(atm, options)
 
     bc["btemp"] += dTdt_surf * dt_dyn
     #dt_min_surf = torch.min(torch.abs(bc["btemp"] / dTdt_surf))
@@ -378,6 +433,7 @@ def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
         "xH2SO4aer": xfrac[:, :],
         "xS8aer": xfrac[:, :]
     }
+    #the below is essentially only used as a guess for calculating total atmospheric mass
     pressure = calc_pressure_atm_tensor(atm, options)
     atm["pres"] = pressure
 
@@ -506,7 +562,7 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     #print('pseudo precip rate: ', pseudo_precip_rate)
 
     atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
-    atm["pres"] = calc_pressure_atm_tensor(atm, options)
+    #atm["pres"] = calc_pressure_atm_tensor(atm, options)
     return atm, precip_rate, amd_layer
 
 def check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key):

@@ -63,7 +63,7 @@ opacities:
 
   S8:
     type: fourcolumn
-    data: [s8_0.1um_optical_constants.txt]
+    data: [s8_mieparams_r0.1um.txt]
     species: [S8]
     nmom: 4
 
