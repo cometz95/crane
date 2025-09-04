@@ -668,10 +668,10 @@ particles:
   gas-phase: CO2
   saturation:
     model: LinearLatentHeat
-    parameters: {mu: 44.01, T-ref: 250.0, P-ref: 17843680.0, T-triple: 216.58,
+    parameters: {mu: 44.01, T-ref: 250.0, P-ref: 34022286.8, T-triple: 216.58,
       T-critical: 304.13}
-    vaporization: {a: 4656475000.0, b: -3393595.0}
-    sublimation: {a: 6564668000.0, b: -3892217.0}
+    vaporization: {a: 6070129828.86, b: -1014914.36}
+    sublimation: {a: 6070129828.86, b: -1014914.36}
     super-critical: {a: 163590800000.0, b: 0.0}
 - name: S8aer
   composition: {S: 8}
@@ -681,11 +681,37 @@ particles:
   gas-phase: S8
   saturation:
     model: LinearLatentHeat
-    parameters: {mu: 256.52, T-ref: 400.0, P-ref: 104.922, T-triple: 392.0,
+    parameters: {mu: 256.52, T-ref: 200.0, P-ref: 1.15e-11, T-triple: 199.0,
       T-critical: 675.0}
-    vaporization: {a: 2886561000.0, b: -905383.2}
-    sublimation: {a: 2700081000.0, b: 3262241.0}
+    vaporization: {a: 3832217698, b: 84.66}
+    sublimation: {a: 3832217698, b: 84.66}
     super-critical: {a: 137025500000.0, b: 0.0}
+- name: S2aer
+  composition: {S: 2}
+  density: 1.4
+  optical-properties: none
+  formation: saturation
+  gas-phase: S2
+  saturation:
+    model: LinearLatentHeat
+    parameters: {mu: 64.0, T-ref: 200.0, P-ref: 3.578e-23, T-triple: 199,
+      T-critical: 500}
+    vaporization: {a: 24050070154.86, b: -340.67}
+    sublimation: {a: 24050070154.86, b: -340.67}
+    super-critical: {a: 24114934558.47, b: 0.0}
+- name: HClaer
+  composition: {H: 1, Cl: 2}
+  density: 1.2
+  optical-properties: none
+  formation: saturation
+  gas-phase: HCl
+  saturation:
+    model: LinearLatentHeat
+    parameters: {mu: 36.5, T-ref: 190.0, P-ref: 1105279, T-triple: 188.3,
+      T-critical: 309.4}
+    vaporization: {a: 4425783851.8, b: 256536.5}
+    sublimation: {a: 7309329062.15, b: -14859722.56}
+    super-critical: {a: 24114934558.47, b: 0.0}
 - name: H2SO4aer
   composition: {H: 2, S: 1, O: 4}
   density: 1.85

@@ -4,6 +4,9 @@ import numpy as np
 from torch import tensor, zeros, ones
 import os
 from scipy.interpolate import griddata, RegularGridInterpolator
+
+torch.set_printoptions(precision=50, sci_mode=True)
+
 from pyharp import (
     constants,
     calc_dz_hypsometric,
@@ -458,34 +461,27 @@ def read_opacity_file(filename: str) -> torch.Tensor:
 
 @torch.jit.script
 def torch_log_interp(query: torch.Tensor, coords: torch.Tensor, lookup: torch.Tensor) -> torch.Tensor:
-    """
-    1D linear interpolation in TorchScript with log-transform.
-    
-    Args:
-        query: Query points (any shape)
-        coords: Known x-coordinates, shape (N,)
-        lookup: Known y-values at coords, shape (N,)
-    
-    Returns:
-        Interpolated values, same shape as query
-    """
-    # Clamp lookup to avoid log(0)
-    eps = 1e-300
-    safe_lookup = torch.clamp(lookup, min=eps)
+    eps = torch.tensor(1e-300, dtype=torch.float64)  # Make eps a float64 tensor
+
+    safe_lookup = torch.clamp(lookup, min=eps.item())  # clamp can accept float scalar
     log_lookup = torch.log(safe_lookup)
 
-    # Clip query to range of coords to avoid out-of-bounds
-    clipped_query = torch.clamp(query, coords.min(), coords.max())
+    min_coord = coords[0]
+    max_coord = coords[-1]
+    clipped_query = torch.clamp(query, min_coord, max_coord)
 
-    # coords must be sorted in ascending order
-    indices = torch.searchsorted(coords, clipped_query, right=True).clamp(min=1, max=coords.size(0) - 1)
+    indices = torch.searchsorted(coords, clipped_query, right=True)
+    indices = indices.clamp(min=1, max=coords.size(0) - 1)
 
     c0 = coords[indices - 1]
     c1 = coords[indices]
     l0 = log_lookup[indices - 1]
     l1 = log_lookup[indices]
 
-    slope = (l1 - l0) / (c1 - c0)
+    denom = c1 - c0
+    denom = torch.where(denom == 0, torch.full_like(denom, eps), denom)
+
+    slope = (l1 - l0) / denom
     log_interp = l0 + slope * (clipped_query - c0)
 
     return torch.exp(log_interp)
@@ -578,26 +574,28 @@ class JITCIA(torch.nn.Module):
 
         with Dataset(ck_nc_fname + '-' + bname + '.nc' , "r") as nc:
             nweights = len(nc.variables["weights"][:])
-            k_vals = nc.variables[safe_cia_name][:] #[nweights, npres, ntemp]
+            k_vals = nc.variables[safe_cia_name][:].astype(np.float64) #[nweights, npres, ntemp]
         assert nweights == nwave_ck, f"Number of ck weights for CIA and gasses must be equal, but got {nwave_ck} != {nwave_ck}. Check your run_cktable functions in rfmlib.py"
 
         self.nweights = nweights
 
-        k_vals = torch.from_numpy(k_vals)
-        ck_temp_axis = torch.from_numpy(abs_temp)
-        temp_anom_grid = torch.from_numpy(temp_anom_grid)
+        k_vals = torch.from_numpy(k_vals).to(torch.float64)
+        ck_temp_axis = torch.from_numpy(abs_temp).to(torch.float64)
+        temp_anom_grid = torch.from_numpy(temp_anom_grid).to(torch.float64)
+
+        
         self.register_buffer('k_vals', k_vals)
         self.register_buffer('ck_temp_axis', ck_temp_axis)
         self.register_buffer('temp_anom_grid', temp_anom_grid)
 
-        import xarray as xr
-        import matplotlib.pyplot as plt
-        ds = xr.open_dataset(ck_nc_fname + '-' + bname + '.nc')
-        data = ds[safe_cia_name].isel(Pressure=0)
-        print("Min value:", data.min().item())
-        print("Max value:", data.max().item())
-        ds[safe_cia_name].isel(Pressure=0).plot(x="TempGrid", y="Wavenumber")
-        plt.show()
+        #import xarray as xr
+        #import matplotlib.pyplot as plt
+        #ds = xr.open_dataset(ck_nc_fname + '-' + bname + '.nc')
+        #data = ds[safe_cia_name].isel(Pressure=0)
+        #print("Min value:", data.min().item())
+        #print("Max value:", data.max().item())
+        #ds[safe_cia_name].isel(Pressure=0).plot(x="TempGrid", y="Wavenumber")
+        #plt.show()
 
         #self.register_buffer('k_data', torch.tensor(cia_interp['k_matrix'], dtype=torch.float64))  # [nwave, ntemp]
         #self.register_buffer('k_temp', torch.tensor(cia_interp['temperature'], dtype=torch.float64))  # [ntemp]
@@ -652,19 +650,12 @@ class JITCIA(torch.nn.Module):
         n2 = conc[:, :, self.species_ids[1]] * N_avo
         ncol, nlyr, nspecies = conc.shape
 
-        k_interp = torch.zeros((self.nweights, ncol, nlyr))
+        k_interp = torch.zeros((self.nweights, ncol, nlyr), dtype=torch.float64)
         for weight_index in range(self.nweights):
             for col in range(ncol):
                 temp_anom = temp[col] - self.cia_tempgrid[0]
-                print('temp_anom', temp_anom)
-                print('temp anom grid', self.temp_anom_grid)
                 #ck_temp_axis must be sorted in ascending order
                 k_interp[weight_index, col, :] = torch_log_interp(temp_anom, self.temp_anom_grid, self.k_vals[weight_index, 0, :])
-                print('------')
-                print('weight_index', weight_index)
-                print('k_interp',k_interp[weight_index, col, :])
-                print('self.k_vals[weight_index, 0, :]', self.k_vals[weight_index, 0, :])
-        print(temp)
 
         #k_interp = torch.ones((self.nweights, ncol, nlyr))
         out = 1e-10 * k_interp * n1.unsqueeze(0) * n2.unsqueeze(0)
