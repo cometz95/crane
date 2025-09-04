@@ -21,7 +21,7 @@ def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
     return dt_min.item()
 
 if __name__ == "__main__":
-    case_name = 'aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur'
+    case_name = 'nom'
 
     options = RadiationModelOptions(
         ncol=1,
@@ -33,31 +33,38 @@ if __name__ == "__main__":
         aerosol_scale_factor = 1.0,  # Aerosol scaling factor
         cSurf=200000,  # Surface thermal inertia (J/(m^2 K))
         kappa=2.0e-3,  # Thermal diffusivity (m^2/s)
-        surf_sw_albedo = 0.3,
+        surf_sw_albedo = 0.2,
         sr_sun = 2.92842e-5,
-        btemp0 = 240,
+        btemp0 = 275,
         ttemp0 = 140,
         solar_temp = 5772,
         lum_scale = 0.7/4, #adjust by 0.7 for age of the sun, and 1/4 for global average
-        nspecies = 5,
+        nspecies = 6,
         coszen = 1,
         nswbin = 200,
-        pbot = 0.53 #bars, init guess
+        pbot = 1.33 #bars, init guess
     )
 
     #init T profile stuff
     lower_init_lapserate = (options.grav/options.cv)*1000    #kelvins/km
     upper_init_lapserate = 0
-    Tsurf_init = 288
+    Tsurf_init = 275
     Tmin_upper = 190
     dyn_T_cutoff = 100000 #m cutoff T evolution at this altitude
     kzz=1e5 #cm^2/s
     default_aero_radius=1e-5 # incm
     aero_new_radius = 1e-5 #cm
     particles_with_new_radius = ['H2SO4aer_r']
+    H2mr = 0.25
+
+    Tref = 200
+    T_plusminus = 100
+    Tpoints = 5
+    CIA_tempgrid = (Tref, T_plusminus, Tpoints)
 
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
     photo_settings_yaml_filename = 'settings.yaml'
+    rt_settings_yaml_filename = "amars-ck.yaml"
     h2so4_opacity_filename = "h2so4_mieparams_r0.1um.txt"
     s8_opacity_filename = "s8_mieparams_r0.1um.txt"
 
@@ -78,8 +85,8 @@ if __name__ == "__main__":
     dyn_timestep_safety_factor = 100
 
     #names of species we are about for RT and condensation, length must match options.nspecies
-    pchem_species_dict = ['CO2','H2O','SO2','S8aer', 'H2SO4aer']
-    harp_species_dict = ['xCO2','xH2O','xSO2','xS8aer', 'xH2SO4aer']
+    pchem_species_dict = ['CO2','H2O','SO2','H2','S8aer', 'H2SO4aer']
+    harp_species_dict = ['xCO2','xH2O','xSO2','xH2','xS8aer', 'xH2SO4aer']
     radius_dict = make_radius_dict("zahnle_amars.yaml", particles_with_new_radius, default_aero_radius, aero_new_radius)
     molec_per_particle_dict = compute_molecules_per_particle("zahnle_amars.yaml", radius_dict)
     
@@ -108,12 +115,12 @@ if __name__ == "__main__":
     }
 
     #species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer','SO','O','S','H2S','CO2','CO2aer','S8','S8aer']
-    keys_to_init = ['CO2', 'H2O'] + particles_with_new_radius
+    keys_to_init = ['CO2','H2', 'H2O'] + particles_with_new_radius
     water_condensate_properties = load_particle_info("H2Oaer", "zahnle_amars.yaml")
-    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius)
+    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr)
     shutil.copy(photo_init_filename, photo_intermediate_filename)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename)
     atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all)
 
     step = 0

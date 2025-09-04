@@ -308,10 +308,10 @@ def make_radius_dict(yaml_filename, particles_with_new_radius, default_aero_radi
 
     return radius_dict
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius):
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename):
     photo_dens = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius)
+    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename)
 
     dxdt_dict = calc_dxdt(
         photo_dens,
@@ -430,6 +430,7 @@ def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
         "xCO2": xfrac[:, :],
         "xH2O": xfrac[:, :],
         condensate_harp_key: xfrac[:, :],
+        "xH2": xfrac[:, :],
         "xH2SO4aer": xfrac[:, :],
         "xS8aer": xfrac[:, :]
     }

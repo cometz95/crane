@@ -2,6 +2,8 @@
 import torch
 import numpy as np
 from torch import tensor, zeros, ones
+import os
+from scipy.interpolate import griddata, RegularGridInterpolator
 from pyharp import (
     constants,
     calc_dz_hypsometric,
@@ -9,7 +11,11 @@ from pyharp import (
     RadiationOptions,
     Radiation,
     disort_config,
+    interpn
 )
+
+from netCDF4 import Dataset
+from gen_new_kcoeff.rfmlib import run_cktable_one_band_CIA
 
 stefanBoltzmannConst = 5.67e-8  # Stefan-Boltzmann constant (W/(m^2 K^4))
 kb_cgs = 1.380649e-16  # Boltzmann constant in erg/K
@@ -48,11 +54,11 @@ class RadiationModelOptions:
         self.pbot = pbot
 
 
-def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius):
+def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename):
     ncol, nlyr = alt.shape
     bc = {}
 
-    rad_op = RadiationOptions.from_yaml("amars-ck.yaml")
+    rad_op = RadiationOptions.from_yaml(rt_settings_yaml_filename)
 
     # configure bands
     for name, band in rad_op.bands().items():
@@ -79,19 +85,19 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
             )
             bc[name + "/umu0"] = options.coszen * ones((ncol,), dtype=torch.float64)
             #h2so4
-            h2so4_species_id = 3
+            h2so4_species_id = 4
             aero_rad_meters = aero_new_radius/100
             h2so4_species_mol_weight = 0.098
             model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band.ww())
             scripted = torch.jit.script(model)
-            scripted.save("h2so4.pt")
+            scripted.save("h2so4-SW.pt")
 
             #s8
-            s8_species_id = 4
+            s8_species_id = 5
             s8_species_mol_weight = 0.256
             model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band.ww())
             scripted = torch.jit.script(model)
-            scripted.save("s8.pt")
+            scripted.save("s8-SW.pt")
 
         else:  # longwave
             #band.ww(band.query_weights())
@@ -99,6 +105,19 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
             band.disort().wave_upper([wmax] * nwave)
             bc[name + "/albedo"] = zeros((nwave, ncol), dtype=torch.float64)
             bc[name + "/temis"] = ones((nwave, ncol), dtype=torch.float64)
+                        
+            model = JITCIA([0, 0], 'CO2-CO2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename) 
+            scripted = torch.jit.script(model)
+            scripted.save("co2_co2.pt")
+            
+            model = JITCIA([0, 3], 'CO2-H2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename)
+            scripted = torch.jit.script(model)
+            scripted.save("co2_h2.pt")
+
+            op = rad_op.bands()[name].opacities()['CO2CO2CIA']
+            op.jit_kwargs(["temp"])
+            op = rad_op.bands()[name].opacities()['CO2H2CIA']
+            op.jit_kwargs(["temp"])
 
     bc["btemp"] = options.btemp0 * ones((ncol,), dtype=torch.float64)
     bc["ttemp"] = options.ttemp0 * ones((ncol,), dtype=torch.float64)
@@ -116,10 +135,12 @@ def calc_amars_rt(rad, atm, bc, options, condensate_harp_key):
     conc[:, :, 0] = atm["xCO2"]
     conc[:, :, 1] = atm["xH2O"]
     conc[:, :, 2] = atm[condensate_harp_key]
-    conc[:, :, 3] = atm["xH2SO4aer"] * options.aerosol_scale_factor
-    conc[:, :, 4] = atm["xS8aer"]  * options.aerosol_scale_factor
+    conc[:, :, 3] = atm["xH2"]
+    conc[:, :, 4] = atm["xH2SO4aer"] * options.aerosol_scale_factor
+    conc[:, :, 5] = atm["xS8aer"]  * options.aerosol_scale_factor
 
     conc *= atm['pres'].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
+
     netflux, downward_flux, upward_flux = rad.forward(conc, dz, bc, atm)
 
     return netflux, downward_flux, upward_flux
@@ -367,7 +388,6 @@ def calc_p_den_scaleheight(alt, temp, options):
     return pressure, density
 
 class JITAero(torch.nn.Module):
-    species_id = 0
     def __init__(self, species_id, opacity_filename, rad_model_options, species_mol_weight, target_wavenumber_grid) -> torch.Tensor:
         super().__init__()
         self.species_id = species_id
@@ -432,7 +452,352 @@ class JITAero(torch.nn.Module):
         
         return res
     
-    
 def read_opacity_file(filename: str) -> torch.Tensor:
     data = np.genfromtxt(filename, skip_header = 3)
     return torch.tensor(data, dtype=torch.float64)
+
+@torch.jit.script
+def torch_log_interp(query: torch.Tensor, coords: torch.Tensor, lookup: torch.Tensor) -> torch.Tensor:
+    """
+    1D linear interpolation in TorchScript with log-transform.
+    
+    Args:
+        query: Query points (any shape)
+        coords: Known x-coordinates, shape (N,)
+        lookup: Known y-values at coords, shape (N,)
+    
+    Returns:
+        Interpolated values, same shape as query
+    """
+    # Clamp lookup to avoid log(0)
+    eps = 1e-300
+    safe_lookup = torch.clamp(lookup, min=eps)
+    log_lookup = torch.log(safe_lookup)
+
+    # Clip query to range of coords to avoid out-of-bounds
+    clipped_query = torch.clamp(query, coords.min(), coords.max())
+
+    # coords must be sorted in ascending order
+    indices = torch.searchsorted(coords, clipped_query, right=True).clamp(min=1, max=coords.size(0) - 1)
+
+    c0 = coords[indices - 1]
+    c1 = coords[indices]
+    l0 = log_lookup[indices - 1]
+    l1 = log_lookup[indices]
+
+    slope = (l1 - l0) / (c1 - c0)
+    log_interp = l0 + slope * (clipped_query - c0)
+
+    return torch.exp(log_interp)
+
+class JITCIA(torch.nn.Module):
+    def __init__(self, species_ids, opacity_filename, ncol, nlyr, bname, band, CIA_tempgrid, rt_settings_yaml_filename):
+        super().__init__()
+        self.species_ids = species_ids
+        self.cia_tempgrid = CIA_tempgrid
+        cia_name = opacity_filename.split('_')[0]
+        safe_cia_name = cia_name.replace("-", "_")
+
+        cia_data = read_cia_file(opacity_filename)
+        cia_interp = fillin_empty_k_data(cia_data)
+
+        nwave_ck = len(band.ww())
+        wmin = band.disort().wave_lower()[0]
+        wmax = band.disort().wave_upper()[0]
+        nwave_lbl = int(round( (wmax - wmin)/0.1 ))
+        wavenumber_axis_lbl = np.linspace(wmin, wmax, nwave_lbl)
+        lbl_nc_fname = 'lbl-' + safe_cia_name
+        ck_nc_fname = 'ck-' + safe_cia_name
+
+        pres = np.array([100000])
+        ref_temp = np.array(CIA_tempgrid[0])
+        temp_anom_grid = np.linspace(-CIA_tempgrid[1], CIA_tempgrid[1], 2 * CIA_tempgrid[2] - 1)
+        abs_temp = np.ones_like(temp_anom_grid ) * CIA_tempgrid[0] + temp_anom_grid 
+
+        interp_func = RegularGridInterpolator(
+            (cia_interp['wavenumber'], cia_interp['temperature']),
+            cia_interp['k_matrix'],
+            method='linear',                # linear interpolation for inner points
+            bounds_error=False,
+            fill_value=0.0                  # extrapolated wavenumbers → k, T = 0
+        )
+
+        abs_temp_clipped = np.clip(
+            abs_temp,
+            a_min=np.min(cia_interp['temperature']),
+            a_max=np.max(cia_interp['temperature'])
+        )
+
+        num_waves = len(wavenumber_axis_lbl)
+        num_temps = len(abs_temp_clipped)
+
+        k_array = np.zeros((num_waves, 1, num_temps))
+
+        #atm_T_flat = temp_clipped_np.ravel()
+
+        for i, w in enumerate(wavenumber_axis_lbl):
+            wave_array = np.full_like(abs_temp_clipped, w)
+            points = np.column_stack((wave_array, abs_temp_clipped))
+            k_values = interp_func(points)
+            k_array[i, 0, :] = k_values
+
+        ncfile = Dataset(lbl_nc_fname + '-' + bname + '.nc' , "w")
+
+        ncfile.createDimension("Wavenumber", nwave_lbl)
+        dim = ncfile.createVariable("Wavenumber", "f8", ("Wavenumber",))
+        dim[:] = wavenumber_axis_lbl
+        dim.long_name = "lbl wavenumber"
+        dim.units = "1/cm"
+
+        ncfile.createDimension("Pressure", len(pres))
+        dim = ncfile.createVariable("Pressure", "f8", ("Pressure",))
+        dim[:] = pres
+        dim.long_name = "reference pressure"
+        dim.units = "pa"
+
+        ncfile.createDimension("TempGrid", len(temp_anom_grid))
+        dim = ncfile.createVariable("TempGrid", "f8", ("TempGrid",))
+        dim[:] = temp_anom_grid
+        dim.long_name = "temperature anomaly grid"
+        dim.units = "K"
+
+        var = ncfile.createVariable("Temperature", "f8", ("Pressure",))
+        var[:] = ref_temp
+        var.long_name = "reference temperature"
+        var.units = "K"
+
+        var = ncfile.createVariable(
+            safe_cia_name, "f8", ("Wavenumber", "Pressure", "TempGrid")
+        )
+        var[:] = k_array
+        var.long_name = "CIA k-coefficients"
+        var.units = 'cm^5/molecule'
+        ncfile.close()
+
+        run_cktable_one_band_CIA(bname, rt_settings_yaml_filename, lbl_nc_fname, ck_nc_fname, safe_cia_name)
+
+        with Dataset(ck_nc_fname + '-' + bname + '.nc' , "r") as nc:
+            nweights = len(nc.variables["weights"][:])
+            k_vals = nc.variables[safe_cia_name][:] #[nweights, npres, ntemp]
+        assert nweights == nwave_ck, f"Number of ck weights for CIA and gasses must be equal, but got {nwave_ck} != {nwave_ck}. Check your run_cktable functions in rfmlib.py"
+
+        self.nweights = nweights
+
+        k_vals = torch.from_numpy(k_vals)
+        ck_temp_axis = torch.from_numpy(abs_temp)
+        temp_anom_grid = torch.from_numpy(temp_anom_grid)
+        self.register_buffer('k_vals', k_vals)
+        self.register_buffer('ck_temp_axis', ck_temp_axis)
+        self.register_buffer('temp_anom_grid', temp_anom_grid)
+
+        import xarray as xr
+        import matplotlib.pyplot as plt
+        ds = xr.open_dataset(ck_nc_fname + '-' + bname + '.nc')
+        data = ds[safe_cia_name].isel(Pressure=0)
+        print("Min value:", data.min().item())
+        print("Max value:", data.max().item())
+        ds[safe_cia_name].isel(Pressure=0).plot(x="TempGrid", y="Wavenumber")
+        plt.show()
+
+        #self.register_buffer('k_data', torch.tensor(cia_interp['k_matrix'], dtype=torch.float64))  # [nwave, ntemp]
+        #self.register_buffer('k_temp', torch.tensor(cia_interp['temperature'], dtype=torch.float64))  # [ntemp]
+        #self.register_buffer('k_wave', torch.tensor(cia_interp['wavenumber'], dtype=torch.float64))   # [nwave]
+        '''
+        temp = kwargs["temp"]
+        if "wavenumber" in kwargs:
+            wave = kwargs["wavenumber"]
+        elif "wavelength" in kwargs:
+            wave = 1e4 / kwargs["wavelength"]
+        elif "weight" in kwargs:
+            wave = kwargs["weight"]
+        else:
+            raise ValueError("Must provide 'wavenumber' or 'wavelength' in kwargs.")
+
+        wave = torch.tensor(wave).to(self.k_wave.dtype)
+        temp = torch.tensor(temp).to(self.k_temp.dtype)
+
+        ncol, nlyr, nspecies = conc.shape
+        nwave = wave.shape[0]
+
+        kwave_np = self.k_wave.detach().cpu().numpy()
+        ktemp_np = self.k_temp.detach().cpu().numpy()
+
+        interp_func = RegularGridInterpolator(
+            (kwave_np, ktemp_np),
+            self.k_data.detach().cpu().numpy(),
+            method='linear',                # linear interpolation for inner points
+            bounds_error=False,
+            fill_value=0.0                  # extrapolated wavenumbers → k = 0
+        )
+
+        temp_clipped = torch.clamp(temp, min=np.min(ktemp_np), max=np.max(ktemp_np))
+        temp_clipped_np = temp_clipped.detach().cpu().numpy()
+
+        nwave = len(wave)
+        ncol, nlyr = temp_clipped_np.shape
+        k_interp = np.empty((nwave, ncol, nlyr))
+
+        atm_T_flat = temp_clipped_np.ravel()
+
+        for i, w in enumerate(wave):
+            wave_array = np.full_like(atm_T_flat, w)
+            points = np.column_stack((wave_array, atm_T_flat))
+            k_values = interp_func(points)
+            k_interp[i, :, :] = k_values.reshape(ncol, nlyr)
+        '''
+    def forward(self, conc, temp) -> torch.Tensor:
+
+        N_avo = 6.022e23
+        n1 = conc[:, :, self.species_ids[0]] * N_avo  #convert mol/m^3 to molecule/m^3
+        n2 = conc[:, :, self.species_ids[1]] * N_avo
+        ncol, nlyr, nspecies = conc.shape
+
+        k_interp = torch.zeros((self.nweights, ncol, nlyr))
+        for weight_index in range(self.nweights):
+            for col in range(ncol):
+                temp_anom = temp[col] - self.cia_tempgrid[0]
+                print('temp_anom', temp_anom)
+                print('temp anom grid', self.temp_anom_grid)
+                #ck_temp_axis must be sorted in ascending order
+                k_interp[weight_index, col, :] = torch_log_interp(temp_anom, self.temp_anom_grid, self.k_vals[weight_index, 0, :])
+                print('------')
+                print('weight_index', weight_index)
+                print('k_interp',k_interp[weight_index, col, :])
+                print('self.k_vals[weight_index, 0, :]', self.k_vals[weight_index, 0, :])
+        print(temp)
+
+        #k_interp = torch.ones((self.nweights, ncol, nlyr))
+        out = 1e-10 * k_interp * n1.unsqueeze(0) * n2.unsqueeze(0)
+
+        return out.unsqueeze(-1)  # [nwave, ncol, nlyr]
+
+#returns dict with wavenumber grid, temp grid, and kdata(2d array which is k(v,T), as given in original hitran file)
+def read_cia_file(filename):
+    cianame = os.path.basename(filename).split('_')[0]
+
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+    
+    sections = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if line.startswith(cianame):
+            # Parse header
+            parts = line.split()
+            wn_start = float(parts[1])
+            wn_end = float(parts[2])
+            npoints = int(parts[3])
+            temperature = float(parts[4])
+            
+            # Read following `npoints` lines
+            i += 1
+            wn = []
+            k = []
+            for _ in range(npoints):
+                w, val = lines[i].strip().split()
+                wn.append(float(w))
+                k.append(float(val))
+                i += 1
+            
+            sections.append({
+                'temperature': temperature,
+                'wavenumber': np.array(wn),
+                'k': np.array(k)
+            })
+        else:
+            i += 1
+    
+    # Collect all unique wavenumbers
+    all_wavenumbers = sorted(set(np.concatenate([s['wavenumber'] for s in sections])))
+    wavenumber_axis = np.array(all_wavenumbers)
+    
+    # Collect all temperatures
+    temperatures = sorted(set(s['temperature'] for s in sections))
+    temp_axis = np.array(temperatures)
+    
+    # Initialize k-matrix
+    k_matrix = np.full((len(wavenumber_axis), len(temp_axis)), np.nan)
+
+    # Fill matrix
+    wn_index = {wn: idx for idx, wn in enumerate(wavenumber_axis)}
+    temp_index = {t: idx for idx, t in enumerate(temp_axis)}
+
+    for s in sections:
+        t_idx = temp_index[s['temperature']]
+        for wn_val, k_val in zip(s['wavenumber'], s['k']):
+            w_idx = wn_index[wn_val]
+            k_matrix[w_idx, t_idx] = k_val
+    
+    return {
+        'wavenumber': wavenumber_axis,
+        'temperature': temp_axis,
+        'k_matrix': k_matrix
+    }
+
+#in the hitran k data file, some T and wavenumbers have no data, so we take whatever data we have an extend it to other measured parameter regions
+def fillin_empty_k_data(cia_data):
+    wn_axis = cia_data['wavenumber']
+    temp_axis = cia_data['temperature']
+    k_matrix = cia_data['k_matrix']
+
+    k_matrix[k_matrix < 0] = np.nan
+
+    # Build grid
+    wn_grid, temp_grid = np.meshgrid(wn_axis, temp_axis, indexing='ij')
+
+    # Flatten
+    points = np.column_stack((wn_grid.ravel(), temp_grid.ravel()))
+    values = k_matrix.ravel()
+
+    # Filter known values
+    mask = ~np.isnan(values)
+    known_points = points[mask]
+    known_values = values[mask]
+
+    # Interpolate
+    interpolated = griddata(
+        known_points,
+        known_values,
+        points,
+        method='linear'
+    )
+
+    # Nearest fill for remaining NaNs
+    nan_mask = np.isnan(interpolated)
+    if np.any(nan_mask):
+        interpolated[nan_mask] = griddata(
+            known_points,
+            known_values,
+            points[nan_mask],
+            method='nearest'
+        )
+
+    # Reshape
+    full_k_matrix = interpolated.reshape(k_matrix.shape)
+
+    # Return same format with interpolated values
+    return {
+        'wavenumber': wn_axis,
+        'temperature': temp_axis,
+        'k_matrix': full_k_matrix
+    }
+    
+if __name__ == "__main__":
+
+        filename = 'CO2-H2_2018.cia'
+        cia_data = read_cia_file(filename)
+        cia_interp = fillin_empty_k_data(cia_data)
+
+
+        ncol = 1
+        nlyr = 4
+        nwave = 5
+
+        conc = torch.ones((ncol, nlyr, 2), dtype=torch.float64) * 1e2  # mol/m³
+        temp = torch.tensor([[100.0, 220.0, 300.0, 400.0]])
+        wavenumber = torch.tensor([1,25,50,75,100,200,500,600,700,800,900,1000.0, 1050.0, 1100.0, 1500,2000, 3000, 4000], dtype=torch.float64)  # cm⁻¹
+
+        model = JITCIA(species_ids=[0, 1], opacity_filename=filename)
+        result = model(conc, {"temp": temp, "wavenumber": wavenumber})
+        print(result)

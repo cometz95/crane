@@ -172,7 +172,7 @@ def plot_chem_each_timestep_alt(pc, options, photo_info):
     ax3.cla()
 
     sol = pc.mole_fraction_dict()
-    species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer']
+    species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer','H2']
     N2 = calc_brunt_vaisala_frequency_alt(pc.var.temperature, photo_info, options)
 
     # Plot T-P profile
@@ -295,7 +295,7 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
     #need to modify the enclosing function argument to pass fig and axs before using the below rh plotter
     #plot_rh_each_timestep(pc, fig, axs)
 
-    #pc.out2atmosphere(photo_intermediate_filename)
+    pc.out2atmosphere_txt(photo_intermediate_filename,overwrite=True)
 
     return photo_alt_grid
 
@@ -373,7 +373,7 @@ def initialize_species_profiles(species_keys, temp, pres, condensate_properties,
 
 #ASSUMES ALL SPECIES PASSED IN ARE 0 BESIDES H2O, WHICH IS AT SATURATION AT INITIAL TEMP, and CO2
 #pres input is in pa
-def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensate_properties, aero_new_radius, default_aero_radius, blank_value=1e-40):
+def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensate_properties, aero_new_radius, default_aero_radius, H2mr, blank_value=1e-40):
     n_layers = len(temp)
     species_profiles = {}
     blank_array = np.full(n_layers, blank_value)
@@ -393,6 +393,8 @@ def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensa
             species_profiles[key] = condensate_properties.saturation_data.sat_pressure(temp) / pres
         elif key.lower().endswith("_r"):
             species_profiles[key] = np.full(n_layers, aero_new_radius)
+        elif key.upper() == "H2":
+            species_profiles[key] = np.full(n_layers, H2mr)
     if "CO2" in [k.upper() for k in keys_to_init]:
         # Subtract all initialized species except those ending with _r and CO2 itself
         subtract = np.zeros(n_layers)
@@ -403,7 +405,7 @@ def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensa
 
     return species_profiles
 
-def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius):
+def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr):
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
     # Compute new altitude grid at layer centers
@@ -432,7 +434,7 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
     #converting p from dynes/cm^2 to Pa
     #species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, aero_new_radius, blank_value=1e-40)
     all_keys = old_chem_atmosphere_data.keys()
-    species_profiles = initialize_species_profiles_to0(all_keys, keys_to_init, temp, p/10, water_condensate_properties, aero_new_radius, default_aero_radius, blank_value=1e-40)
+    species_profiles = initialize_species_profiles_to0(all_keys, keys_to_init, temp, p/10, water_condensate_properties, aero_new_radius, default_aero_radius, H2mr, blank_value=1e-40)
 
     for species, profile in species_profiles.items():
         updates[species] = profile
