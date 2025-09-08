@@ -1,0 +1,12 @@
+so2 dominated starts collapsing between
+
+aerosol_scale_factor = 1e-6 and 1e-7
+
+h2s seems to always collapse, even when aerosol = 0, regrardless of albedo
+
+i have tried co2 = 1.5 bar, doesn't make sense to go much higher than that considering kite paleopressure 
+
+
+
+
+next step is to include GHG like H2 to raise Tsurf and stop the collapse

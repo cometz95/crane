@@ -92,16 +92,16 @@ opacities:
 
   CO2CO2CIA:
     type: jit
-    data: [co2_co2.pt]
+    data: [co2_co2-<band>.pt]
     species: [CO2, CO2]
 
   CO2H2CIA:
     type: jit
-    data: [co2_h2.pt]
+    data: [co2_h2-<band>.pt]
     species: [CO2, H2]
     
-#bands: [SW, B1, B2, B3, B4, B5, B6, B7, B8]
-bands: [SW, B1]
+bands: [SW, B1, B2, B3, B4, B5, B6, B7, B8]
+#bands: [SW, B1]
 
 SW:
   range: [2000., 50000.]
@@ -119,49 +119,49 @@ B1:
 
 B2:
   range: [250., 438.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   solver: disort
   integration: weight
   flags: lamber,quiet,onlyfl,planck
 
 B3:
   range: [438., 675.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B4:
   range: [675., 1062.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B5:
   range: [1062., 1200.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B6:
   range: [1200., 1600.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B7:
   range: [1600., 1900.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B8:
   range: [1900., 2000.]
-  opacities: [SO2, CO2, H2O, H2]
+  opacities: [SO2, CO2, H2O, H2, CO2CO2CIA, CO2H2CIA]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck

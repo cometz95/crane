@@ -5,8 +5,6 @@ from torch import tensor, zeros, ones
 import os
 from scipy.interpolate import griddata, RegularGridInterpolator
 
-torch.set_printoptions(precision=50, sci_mode=True)
-
 from pyharp import (
     constants,
     calc_dz_hypsometric,
@@ -111,11 +109,11 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
                         
             model = JITCIA([0, 0], 'CO2-CO2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename) 
             scripted = torch.jit.script(model)
-            scripted.save("co2_co2.pt")
+            scripted.save(f"co2_co2-{name}.pt")
             
             model = JITCIA([0, 3], 'CO2-H2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename)
             scripted = torch.jit.script(model)
-            scripted.save("co2_h2.pt")
+            scripted.save(f"co2_h2-{name}.pt")
 
             op = rad_op.bands()[name].opacities()['CO2CO2CIA']
             op.jit_kwargs(["temp"])

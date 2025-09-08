@@ -65,6 +65,7 @@ if __name__ == "__main__":
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
     photo_settings_yaml_filename = 'settings.yaml'
     rt_settings_yaml_filename = "amars-ck.yaml"
+    photochem_rxn_file = "zahnle_amars.yaml"
     h2so4_opacity_filename = "h2so4_mieparams_r0.1um.txt"
     s8_opacity_filename = "s8_mieparams_r0.1um.txt"
 
@@ -87,10 +88,10 @@ if __name__ == "__main__":
     #names of species we are about for RT and condensation, length must match options.nspecies
     pchem_species_dict = ['CO2','H2O','SO2','H2','S8aer', 'H2SO4aer']
     harp_species_dict = ['xCO2','xH2O','xSO2','xH2','xS8aer', 'xH2SO4aer']
-    radius_dict = make_radius_dict("zahnle_amars.yaml", particles_with_new_radius, default_aero_radius, aero_new_radius)
-    molec_per_particle_dict = compute_molecules_per_particle("zahnle_amars.yaml", radius_dict)
+    radius_dict = make_radius_dict(photochem_rxn_file, particles_with_new_radius, default_aero_radius, aero_new_radius)
+    molec_per_particle_dict = compute_molecules_per_particle(photochem_rxn_file, radius_dict)
     
-    condensate_properties = load_particle_info("SO2aer", "zahnle_amars.yaml")
+    condensate_properties = load_particle_info("SO2aer", photochem_rxn_file)
     condensate_harp_key = 'xSO2'
 
     #io file names
@@ -116,12 +117,15 @@ if __name__ == "__main__":
 
     #species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer','SO','O','S','H2S','CO2','CO2aer','S8','S8aer']
     keys_to_init = ['CO2','H2', 'H2O'] + particles_with_new_radius
-    water_condensate_properties = load_particle_info("H2Oaer", "zahnle_amars.yaml")
-    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr)
+    water_condensate_properties = load_particle_info("H2Oaer", photochem_rxn_file)
+    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, 
+                                          Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr)
     shutil.copy(photo_init_filename, photo_intermediate_filename)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename)
-    atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all)
+    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, 
+                                                                options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename,
+                                                                h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file)
+    atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
 
     step = 0
     switch_index = 0
@@ -155,7 +159,7 @@ if __name__ == "__main__":
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff)
         #atm_before_convadj = copy.deepcopy(atm)
 
-        photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename)
+        photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename, photochem_rxn_file)
         dxdt_dict = calc_dxdt(
             photo_dens,
             photo_binary_filename,
@@ -164,11 +168,18 @@ if __name__ == "__main__":
         )
 
         x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_alt_grid)
-        atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_atm)
+        #if there is more water in the atmosphere than SO2/H2S, use that to calc moist adiabatic lapserate
+        if atm["xH2O"][0][0].item() > atm[condensate_harp_key][0][0].item():
+            malr_condensate_key = "xH2O"
+            malr_condensate_properties = water_condensate_properties
+        else:
+            malr_condensate_key = condensate_harp_key
+            malr_condensate_properties = condensate_properties
+        atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, malr_condensate_properties, dt_dyn, malr_condensate_key, dTdt_atm)
         dt_min = calc_dyn_tempstep(bc["btemp"], dTdt_surf, atm_old_temps["temp"], atm["temp"], dt_dyn)
         atm_old_temps = copy.deepcopy(atm)
 
-        atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all)
+        atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
         atm = update_atm_x(atm, pchem_species_dict, harp_species_dict, photo_intermediate_filename)
         #atm_after_convadj = copy.deepcopy(atm)
         #precip_rate_list.append(precip_rate)

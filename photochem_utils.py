@@ -260,13 +260,13 @@ def config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_
             # Save the interpolated values to atm[harp_key]
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
 
-def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename):
-    update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename)
+def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file):
+    update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename, photochem_rxn_file)
     photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
     photo_alt_grid = photo_atm_data["alt"]
 
     pc = EvoAtmosphere(
-    'zahnle_amars.yaml',
+    photochem_rxn_file,
     photo_settings_yaml_filename,
     'Sun_3.5Ga_s0_4.txt',
     photo_intermediate_filename
@@ -299,10 +299,10 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
 
     return photo_alt_grid
 
-def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename):
+def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file):
 
     pc = EvoAtmosphere(
-    'zahnle_amars.yaml',
+    photochem_rxn_file,
     photo_settings_yaml_filename,
     'Sun_3.5Ga_s0_4.txt',
     photo_intermediate_filename
@@ -447,7 +447,7 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
 
     return z_levels
 
-def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, photo_settings_yaml_filename):
+def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, photo_settings_yaml_filename, photochem_rxn_file):
     #need to write pchem zgrid the first time before this is called
     old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
 
@@ -465,7 +465,7 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, photo_
     modify_atmospheric_parameters(old_chem_atmosphere_data, updates, output_filepath=photo_intermediate_filename) 
 
     pc = EvoAtmosphere(
-        'zahnle_amars.yaml',
+        photochem_rxn_file,
         photo_settings_yaml_filename,
         'Sun_3.5Ga_s0_4.txt',
         photo_intermediate_filename
@@ -520,7 +520,9 @@ def calc_dxdt(photo_den, photo_binary_filename, photo_intermediate_filename, dt_
     for key in species_names:
         if key in old_x_values:
             # (x2 - x1) / dt -> positive value means increase in concentration
-            dxdt_i = ((updates_photo[key] / photo_den) - old_x_values[key]) / dt_photo
+            #dxdt_i = ((updates_photo[key] / photo_den) - old_x_values[key]) / dt_photo
+            #FIXME cmetz dirty fix, directly set the mole frac to just be the new mixing ratio
+            dxdt_i = (updates_photo[key] / photo_den)
             dxdt_dict[key] = torch.tensor(dxdt_i).unsqueeze(0)  # shape [1, nlyr]
 
     return dxdt_dict
@@ -746,9 +748,9 @@ def test_whats_going_on(photo_binary_filename, photo_keys):
         updates_photo[key] = usol_values
         print(f"{key}: {usol_values}")
 
-def update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all):
+def update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file):
 
-    update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename)
+    update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename, photochem_rxn_file)
 
     pc = EvoAtmosphere(
         'zahnle_amars.yaml',

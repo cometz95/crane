@@ -48,6 +48,9 @@ species:
   - name: SO2
     composition: {S: 1, O: 2}
 
+  - name: H2
+    composition: {H: 2}
+
   - name: H2SO4
     composition: {H: 2, S: 1, O: 4}
 
@@ -56,31 +59,36 @@ species:
 
 opacities:
   H2SO4:
-    type: fourcolumn
-    data: [h2so4.txt]
+    type: jit
+    data: [h2so4.pt]
     species: [H2SO4]
     nmom: 4
 
   S8:
     type: fourcolumn
-    data: [s8_k_fuller.txt]
+    data: [s8_mieparams_r0.1um.txt]
     species: [S8]
     nmom: 4
 
   CO2:
     type: rfm-ck
-    data: [amars-ck-<band>.nc]
+    data: [ck-h2_25-so2-3bar-<band>.nc]
     species: [CO2]
 
   H2O:
     type: rfm-ck
-    data: [amars-ck-<band>.nc]
+    data: [ck-h2_25-so2-3bar-<band>.nc]
     species: [H2O]
 
   SO2:
     type: rfm-ck
-    data: [amars-ck-<band>.nc]
+    data: [ck-h2_25-so2-3bar-<band>.nc]
     species: [SO2]
+
+  H2:
+    type: rfm-ck
+    data: [ck-h2_25-so2-3bar-<band>.nc]
+    species: [H2]
 
 bands: [SW, B1, B2, B3, B4, B5, B6, B7, B8]
 
@@ -93,56 +101,56 @@ SW:
 
 B1:
   range: [1., 250.]
-  opacities: [CO2]
+  opacities: [SO2, CO2, H2O, H2]
   solver: disort
   integration: weight
   flags: lamber,quiet,onlyfl,planck
 
 B2:
   range: [250., 438.]
-  opacities: [H2O]
+  opacities: [SO2, CO2, H2O, H2]
   solver: disort
   integration: weight
   flags: lamber,quiet,onlyfl,planck
 
 B3:
   range: [438., 675.]
-  opacities: [SO2]
+  opacities: [SO2, CO2, H2O, H2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B4:
   range: [675., 1062.]
-  opacities: [CO2]
+  opacities: [SO2, CO2, H2O, H2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B5:
   range: [1062., 1200.]
-  opacities: [SO2]
+  opacities: [SO2, CO2, H2O, H2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B6:
   range: [1200., 1600.]
-  opacities: [H2O]
+  opacities: [SO2, CO2, H2O, H2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B7:
   range: [1600., 1900.]
-  opacities: [SO2]
+  opacities: [SO2, CO2, H2O, H2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck
 
 B8:
   range: [1900., 2000.]
-  opacities: [H2O]
+  opacities: [SO2, CO2, H2O, H2]
   integration: weight
   solver: disort
   flags: lamber,quiet,onlyfl,planck

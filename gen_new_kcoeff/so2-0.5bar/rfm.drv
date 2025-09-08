@@ -1,0 +1,21 @@
+*HDR
+    Header for rfm
+*FLG
+    TAB CTM
+*SPC
+    1900.0000 2000.0000 0.1000
+*GAS
+    SO2 CO2 H2O
+*ATM
+    rfm.atm
+*DIM
+    PLV 
+    5 -80.0000 80.0000
+*TAB
+    tab_*.txt
+*HIT
+    HITRAN2020.par
+*CIA
+    CO2-CO2_2018.cia
+*END
+    

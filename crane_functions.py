@@ -308,8 +308,8 @@ def make_radius_dict(yaml_filename, particles_with_new_radius, default_aero_radi
 
     return radius_dict
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename):
-    photo_dens = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename)
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file):
+    photo_dens = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
     rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename)
 
@@ -338,7 +338,9 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
     # 1. Update all mixing ratios in x_atm_all
     for key in x_atm_all:
         if key in dxdt_dict:
-            x_atm_all[key] += dxdt_dict[key] * dt_dyn
+            #x_atm_all[key] += dxdt_dict[key] * dt_dyn
+            #FIXME cmetz dirty fix, directly set the mole frac to just be the new mixing ratio
+            x_atm_all[key] = dxdt_dict[key]
             # Ensure non-negative
             x_atm_all[key] = torch.clamp(x_atm_all[key], min=1e-40)
 
