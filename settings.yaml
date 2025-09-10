@@ -8,7 +8,7 @@ planet:
   #P_surf: 0.5 #bars
   planet-mass: 6.417e26 # grams
   planet-radius: 3.396e8 # cm. Radius to bottom of atmosphere-grid
-  surface-albedo: 0.3 # cm
+  surface-albedo: 0.2
   # photon-scale-factor: 1.0 # Optional. Scales the stellar flux for diff planets in the same system
   solar-zenith-angle: 0.0 # degrees
   hydrogen-escape:

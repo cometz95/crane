@@ -89,14 +89,14 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
             h2so4_species_id = 4
             aero_rad_meters = aero_new_radius/100
             h2so4_species_mol_weight = 0.098
-            model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band.ww())
+            model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band, name)
             scripted = torch.jit.script(model)
             scripted.save("h2so4-SW.pt")
 
             #s8
             s8_species_id = 5
             s8_species_mol_weight = 0.256
-            model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band.ww())
+            model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band, name)
             scripted = torch.jit.script(model)
             scripted.save("s8-SW.pt")
 
@@ -389,14 +389,18 @@ def calc_p_den_scaleheight(alt, temp, options):
     return pressure, density
 
 class JITAero(torch.nn.Module):
-    def __init__(self, species_id, opacity_filename, rad_model_options, species_mol_weight, target_wavenumber_grid) -> torch.Tensor:
+    def __init__(self, species_id, opacity_filename, rad_model_options, species_mol_weight, band, bname) -> torch.Tensor:
         super().__init__()
+        self.bname = bname
         self.species_id = species_id
         self.opacity_filename = opacity_filename
+
+        target_wavenumber_grid = band.ww()
 
         target_wavenumber_grid = np.array(target_wavenumber_grid)
         self.nwave = len(target_wavenumber_grid)
         self.nlayers = rad_model_options.nlyr
+
         self.ncol = rad_model_options.ncol
         self.npmom = 4
         self.nprop = 2 + self.npmom
@@ -429,7 +433,6 @@ class JITAero(torch.nn.Module):
         self.properties = torch.tensor(self.properties, dtype=torch.float64)
 
     def forward(self, conc) -> torch.Tensor:
-
         res = torch.zeros((self.nwave, self.ncol, self.nlayers, self.nprop), dtype=torch.float64)
         dens = conc[:, :, self.species_id] * self.mol_weight  # convert to kg/m^3
         attn_coeff = self.properties[:, 1]

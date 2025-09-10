@@ -736,6 +736,16 @@ def plot_convective_adjustment(atm_before, atm_after, precip_rate, amd_layer, fi
     fig.canvas.draw()
     plt.pause(0.001)
 
+def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
+    true_dTdt_atm = (new_temps - old_temps)/dt_dyn
+    dt_min_atm = torch.min(torch.abs(new_temps / true_dTdt_atm))
+
+    dt_min_surf = torch.min(torch.abs(btemp / dTdt_surf))
+    
+    dt_min = torch.min(dt_min_atm, dt_min_surf)
+
+    return dt_min.item()
+
 if __name__ == "__main__":
     #plot_outputs("outputs_int.txt", 20, 20)  # Change window_size as needed
     plot_outputs("outputs_intermediate_aeroscale0.1_radius0.1um_constz_eartht_blankout_sulfur.txt", 20, 0)  # Change window_size as needed

@@ -1,0 +1,68 @@
+case_name: nom
+
+radiation_options:
+  ncol: 1
+  nlyr: 100
+  nstr: 4
+  grav: 3.711
+  mean_mol_weight: 0.044
+  cv: 658
+  aerosol_scale_factor: 1.0
+  cSurf: 200000
+  kappa: 2.0e-3
+  surf_sw_albedo: 0.2
+  sr_sun: 2.92842e-5
+  btemp0: 275
+  ttemp0: 140
+  solar_temp: 5772
+  lum_scale: 0.175  # 0.7 / 4
+  nspecies: 6
+  coszen: 1
+  nswbin: 200
+  pbot: 1.33
+
+temperature_profile:
+  Tsurf_init: 275
+  Tmin_upper: 190
+  dyn_T_cutoff: 100000  # meters
+  upper_init_lapserate : 0.0  # K/m
+  kzz: 1.0e5  # cm^2/s
+  default_aero_radius: 1.0e-5  # cm
+  aero_new_radius: 1.0e-5  # cm
+  particles_with_new_radius: ['H2SO4aer_r']
+
+cia_tempgrid:
+  Tref: 200
+  T_plusminus: 100
+  Tpoints: 5
+
+filenames:
+  photo_settings_yaml: settings.yaml
+  rt_settings_yaml: amars-ck.yaml
+  photochem_rxn_file: zahnle_amars.yaml
+  h2so4_opacity: h2so4_mieparams_r0.1um.txt
+  s8_opacity: s8_mieparams_r0.1um.txt
+
+runtime:
+  do_plot: true
+  outdir_name: outputs
+  dt_dyn_init: 21600.0
+  t_lim: 315360000.0  # 10 years
+  writeout_step: 1
+  dyn_timestep_safety_factor: 100
+
+species:
+  pchem_species: ['CO2','H2O','SO2','H2','S8aer', 'H2SO4aer']
+  harp_species: ['xCO2','xH2O','xSO2','xH2','xS8aer', 'xH2SO4aer']
+  condensate_harp_key: xSO2
+  condensate_name: SO2aer
+
+chemical_switching:
+  times_to_switch: [315360000000, 315360000000]
+  do_switching_pchem_bc: false
+  photo_settings_yaml_filenames: ['settings.yaml', 'settings2.yaml']
+
+photochem_surface_pressures:
+  CO2: 1.0e6
+  H2O: 1.0e6
+  H2: 0.05e6

@@ -7,67 +7,23 @@ import numpy as np
 import os
 
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
-from crane_functions import init_from_file, config_init_model, safe_euler_integrate_temperature, safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, plot_convective_adjustment, compute_molecules_per_particle, make_radius_dict
+from crane_functions import (init_from_file, config_init_model, safe_euler_integrate_temperature, 
+                             safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, 
+                             plot_convective_adjustment, calc_dyn_tempstep)
 from photochem_utils import calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles, update_p_dens, update_atm_x
-
-def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
-    true_dTdt_atm = (new_temps - old_temps)/dt_dyn
-    dt_min_atm = torch.min(torch.abs(new_temps / true_dTdt_atm))
-
-    dt_min_surf = torch.min(torch.abs(btemp / dTdt_surf))
-    
-    dt_min = torch.min(dt_min_atm, dt_min_surf)
-
-    return dt_min.item()
+from crane_yaml_loader import initialize_from_config
 
 if __name__ == "__main__":
-    case_name = 'nom'
 
-    options = RadiationModelOptions(
-        ncol=1,
-        nlyr=100,
-        nstr = 4,
-        grav=3.711,  # Gravitational acceleration on Mars
-        mean_mol_weight=0.044,  # Mean molecular weight of CO2 (kg/mol)
-        cv=658,  # Specific heat capacity of CO2 (J/(kg K)) at const volume
-        aerosol_scale_factor = 1.0,  # Aerosol scaling factor
-        cSurf=200000,  # Surface thermal inertia (J/(m^2 K))
-        kappa=2.0e-3,  # Thermal diffusivity (m^2/s)
-        surf_sw_albedo = 0.2,
-        sr_sun = 2.92842e-5,
-        btemp0 = 275,
-        ttemp0 = 140,
-        solar_temp = 5772,
-        lum_scale = 0.7/4, #adjust by 0.7 for age of the sun, and 1/4 for global average
-        nspecies = 6,
-        coszen = 1,
-        nswbin = 200,
-        pbot = 1.33 #bars, init guess
-    )
+    params = initialize_from_config('crane_config.yaml')
 
-    #init T profile stuff
-    lower_init_lapserate = (options.grav/options.cv)*1000    #kelvins/km
-    upper_init_lapserate = 0
-    Tsurf_init = 275
-    Tmin_upper = 190
-    dyn_T_cutoff = 100000 #m cutoff T evolution at this altitude
-    kzz=1e5 #cm^2/s
-    default_aero_radius=1e-5 # incm
-    aero_new_radius = 1e-5 #cm
-    particles_with_new_radius = ['H2SO4aer_r']
-    H2mr = 0.25
-
-    Tref = 200
-    T_plusminus = 100
-    Tpoints = 5
-    CIA_tempgrid = (Tref, T_plusminus, Tpoints)
+    case_name = params['case_name']
+    options = params['options']
 
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
-    photo_settings_yaml_filename = 'settings.yaml'
-    rt_settings_yaml_filename = "amars-ck.yaml"
-    photochem_rxn_file = "zahnle_amars.yaml"
-    h2so4_opacity_filename = "h2so4_mieparams_r0.1um.txt"
-    s8_opacity_filename = "s8_mieparams_r0.1um.txt"
+    photo_settings_yaml_filename = params['photo_settings_yaml_filename']
+    rt_settings_yaml_filename = params['rt_settings_yaml_filename']
+    photochem_rxn_file = params['photochem_rxn_file']
 
     shared = {}
     do_plot = True #if True, plots the atmosphere at each timestep
@@ -77,22 +33,12 @@ if __name__ == "__main__":
 
     #for now, make the timesteps all equal
     # otherwise, the code is setup so that dt_rad and dt_photo must be multiples of dt_dyn
-    dt_dyn = 86400.0/4      #seconds
-    dt_rad = dt_dyn
-    dt_photo = dt_dyn
-    dt_lower_lim = dt_dyn
-    t_lim = dt_dyn*4*365*10     #length of time to run the model for, in seconds
-    writeout_step = 1
-    dyn_timestep_safety_factor = 100
-
-    #names of species we are about for RT and condensation, length must match options.nspecies
-    pchem_species_dict = ['CO2','H2O','SO2','H2','S8aer', 'H2SO4aer']
-    harp_species_dict = ['xCO2','xH2O','xSO2','xH2','xS8aer', 'xH2SO4aer']
-    radius_dict = make_radius_dict(photochem_rxn_file, particles_with_new_radius, default_aero_radius, aero_new_radius)
-    molec_per_particle_dict = compute_molecules_per_particle(photochem_rxn_file, radius_dict)
+    dt_dyn = params['dt_dyn_init']      #seconds
+    dt_lower_lim = params['dt_dyn_init']
+    t_lim = params['t_lim']    #length of time to run the model for, in seconds
     
-    condensate_properties = load_particle_info("SO2aer", photochem_rxn_file)
-    condensate_harp_key = 'xSO2'
+    condensate_properties = params['condensate_properties']
+    condensate_harp_key = params['condensate_harp_key']
 
     #io file names
     init_xfrac_filebase = 'atmosphere_init_stable.txt'
@@ -116,25 +62,18 @@ if __name__ == "__main__":
     }
 
     #species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer','SO','O','S','H2S','CO2','CO2aer','S8','S8aer']
-    keys_to_init = ['CO2','H2', 'H2O'] + particles_with_new_radius
     water_condensate_properties = load_particle_info("H2Oaer", photochem_rxn_file)
-    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, lower_init_lapserate, upper_init_lapserate, 
-                                          Tsurf_init, Tmin_upper, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr)
+    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, params['lower_init_lapserate'], params['upper_init_lapserate'], 
+                                          params['Tsurf_init'], params['Tmin_upper'], options, params['keys_to_init'], water_condensate_properties, params['aero_new_radius'], params['kzz'], params['default_aero_radius'], params['H2mr'])
     shutil.copy(photo_init_filename, photo_intermediate_filename)
     temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key) # Load the initial atmosphere from the photochem file
     dxdt_dict, dTdt_atm, dTdt_surf, rad, bc = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, 
-                                                                options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename,
-                                                                h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file)
+                                                                options, params['pchem_species_dict'], params['harp_species_dict'], params['dt_dyn_init'], shared, do_plot, photo_settings_yaml_filename,
+                                                                params['h2so4_opacity_filename'], params['s8_opacity_filename'], condensate_harp_key, params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, photochem_rxn_file)
     atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
 
     step = 0
     switch_index = 0
-
-    #can switch the photochem boundary conditions after a certain amount of time
-    do_switching_pchem_bc = False
-    times_to_switch =[t_lim + 1e8, t_lim + 1e9]
-    photo_settings_yaml_filenames = ['settings.yaml', 'settings2.yaml']
-    tot_time = 0.0
 
     #plt.ion()
     #fig, axs = plt.subplots(1, 3, figsize=(12, 4), dpi=100)
@@ -142,6 +81,7 @@ if __name__ == "__main__":
 
     atm_old_temps = copy.deepcopy(atm)
 
+    tot_time = 0.0
     while tot_time < t_lim:
         #each step proceeds in this order:
         #call radiation, do heating
@@ -156,7 +96,7 @@ if __name__ == "__main__":
             options=options,
             shared=shared)
 
-        atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff)
+        atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, params['dyn_T_cutoff'])
         #atm_before_convadj = copy.deepcopy(atm)
 
         photo_alt_grid = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename, photochem_rxn_file)
@@ -167,7 +107,7 @@ if __name__ == "__main__":
             dt_dyn
         )
 
-        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, pchem_species_dict, harp_species_dict, x_atm_all, photo_alt_grid)
+        x_atm_all, atm = safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, params['pchem_species_dict'], params['harp_species_dict'], x_atm_all, photo_alt_grid)
         #if there is more water in the atmosphere than SO2/H2S, use that to calc moist adiabatic lapserate
         if atm["xH2O"][0][0].item() > atm[condensate_harp_key][0][0].item():
             malr_condensate_key = "xH2O"
@@ -180,12 +120,13 @@ if __name__ == "__main__":
         atm_old_temps = copy.deepcopy(atm)
 
         atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
-        atm = update_atm_x(atm, pchem_species_dict, harp_species_dict, photo_intermediate_filename)
+        atm = update_atm_x(atm, params['pchem_species_dict'], params['harp_species_dict'], photo_intermediate_filename)
         #atm_after_convadj = copy.deepcopy(atm)
         #precip_rate_list.append(precip_rate)
         #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs, options)
+        print('h2mr', params['H2mr'])
         
-        if step % writeout_step == 0:
+        if step % params['writeout_step'] == 0:
             step_filename = "output_" + f"{case_name}_{step}.csv"
 
             # Choose a reference length from one of the atm arrays
@@ -209,18 +150,19 @@ if __name__ == "__main__":
         tot_time += dt_dyn
         step += 1
 
-        if do_switching_pchem_bc:
-            if tot_time > times_to_switch[switch_index]:
+        if params['do_switching_pchem_bc']:
+            if tot_time > params['times_to_switch'][switch_index]:
                 switch_index += 1
-                photo_settings_yaml_filename = photo_settings_yaml_filenames[switch_index]
+                photo_settings_yaml_filename = params['photo_settings_yaml_filenames'][switch_index]
 
-        dt_dyn = dt_min / dyn_timestep_safety_factor
+        dt_dyn = dt_min / params['dyn_timestep_safety_factor']
         if dt_dyn < dt_lower_lim:
             dt_dyn = dt_lower_lim
         #print(step)
         #print('precip rate: ',precip_rate)
 
 
+    print('model finished succesffully after ' + tot_time + ' seconds')
     # Final output
     df = pd.DataFrame(outputs)
     df.to_csv(outputs_final_name, index=False, float_format="%.6g", header=["tot_time [s]", "surface_temp [K]", "precip_rate [m/s]", "atm(pres [Pa], temp [K], xfrac [mol/mol])"])
