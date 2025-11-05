@@ -20,17 +20,19 @@ def initialize_from_config(config_path):
     options = RadiationModelOptions(**rad)
 
     # === Temperature profile ===
-    temp = config["temperature_profile"]
-    Tsurf_init = temp["Tsurf_init"]
-    Tmin_upper = temp["Tmin_upper"]
-    dyn_T_cutoff = temp["dyn_T_cutoff"]
-    kzz = temp["kzz"]
-    default_aero_radius = temp["default_aero_radius"]
-    aero_new_radius = temp["aero_new_radius"]
-    particles_with_new_radius = temp["particles_with_new_radius"]
+    atmset = config["atmosphere_settings"]
+    Tsurf_init = atmset["Tsurf_init"]
+    Tmin_upper = atmset["Tmin_upper"]
+    dyn_T_cutoff = atmset["dyn_T_cutoff"]
+    kzz = atmset["kzz"]
+    default_aero_radius = atmset["default_aero_radius"]
+    aero_new_radius = float(atmset["aero_new_radius"])
+    particles_with_new_radius = atmset["particles_with_new_radius"]
+    upper_init_lapserate = atmset['upper_init_lapserate']
+    Tmin = atmset['Tmin']
+    Tmax = atmset['Tmax']
 
     lower_init_lapserate = (options.grav / options.cv) * 1000
-    upper_init_lapserate = temp['upper_init_lapserate']
 
     # === CIA temp grid ===
     Tref = config["cia_tempgrid"]["Tref"]
@@ -55,8 +57,8 @@ def initialize_from_config(config_path):
     writeout_step = runtime["writeout_step"]
     dyn_timestep_safety_factor = runtime["dyn_timestep_safety_factor"]
 
-    if not os.path.exists(outdir_name):
-        os.makedirs(outdir_name)
+    if not os.path.exists(os.path.join(case_name,outdir_name)):
+        os.makedirs(os.path.join(case_name, outdir_name))
 
     # === Species ===
     species = config["species"]
@@ -77,11 +79,15 @@ def initialize_from_config(config_path):
     molec_per_particle_dict = compute_molecules_per_particle(photochem_rxn_file, radius_dict)
     condensate_properties = load_particle_info(condensate_name, photochem_rxn_file)
 
-    if "photochem_surface_pressures" in config:
-        apply_surface_pressures_to_settings_yaml(
-            config["photochem_surface_pressures"],
-            photo_settings_yaml_filename
-        )
+    update_boundary_conditions(os.path.join('/nfs/turbo/coe-chengcli/nocl4/' + case_name, photo_settings_yaml_filename), config["photochem_surface_pressures"], config["photochem_surface_fluxes"])
+    
+    #rh_condensation = config["species"]["rh_condensation"]
+    #apply_rh_cond_to_settings(
+    #    rh_condensation,
+    #    os.path.join('/nfs/turbo/coe-chengcli/nocl4/' + case_name, photo_settings_yaml_filename)
+    #)
+
+    apply_rundir_to_opacities_yaml('/nfs/turbo/coe-chengcli/nocl4/' + case_name, '/nfs/turbo/coe-chengcli/nocl4/'+ case_name + '/' + rt_settings_yaml_filename)
 
     H2mr = float(config["photochem_surface_pressures"]['H2'])/float(config["photochem_surface_pressures"]['CO2'])
 
@@ -119,26 +125,89 @@ def initialize_from_config(config_path):
         "keys_to_init": keys_to_init,
         "do_switching_pchem_bc": do_switching_pchem_bc,
         "times_to_switch": times_to_switch,
-        "photo_settings_yaml_filenames": photo_settings_yaml_filenames
+        "photo_settings_yaml_filenames": photo_settings_yaml_filenames,
+        "rh_condensation": 0.7,
+        "Tmin": Tmin,
+        "Tmax": Tmax,
     }
 
-def apply_surface_pressures_to_settings_yaml(surface_pressures, settings_yaml_path):
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+
+def update_boundary_conditions(file_path, pressures, fluxes):
+    """
+    Update boundary conditions in a YAML file based on given pressures and fluxes.
+    """
+
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    yaml.width = 4096   # avoid line wrapping
+
+    # Load YAML
+    with open(file_path, "r") as file:
+        yaml_data = yaml.load(file)
+
+    # Construct updates dict automatically
+    updates = {}
+    for species, value in pressures.items():
+        m = CommentedMap([("type", "press"), ("press", float(value))])
+        m.fa.set_flow_style()  # force {inline: dict}
+        updates[species] = {"lower-boundary": m}
+    for species, value in fluxes.items():
+        m = CommentedMap([("type", "flux"), ("flux", float(value))])
+        m.fa.set_flow_style()
+        updates[species] = {"lower-boundary": m}
+
+    # Apply updates in-place
+    for boundary_entry in yaml_data.get("boundary-conditions"):
+        species_name = boundary_entry.get("name")
+        if species_name in updates:
+            for boundary_type, new_values in updates[species_name].items():
+                if boundary_entry.get(boundary_type):
+                    boundary_entry[boundary_type] = new_values
+
+    # Save updated YAML back
+    with open(file_path, "w") as file:
+        yaml.dump(yaml_data, file)
+
+def apply_rh_cond_to_settings(rh_cond_val, settings_yaml_path):
     yaml = YAML()
     yaml.preserve_quotes = True
 
     with open(settings_yaml_path, "r") as f:
         data = yaml.load(f)
 
-    modified = False
-    for entry in data.get("boundary-conditions", []):
-        species_name = entry.get("name")
-        if species_name in surface_pressures:
-            lb = entry.get("lower-boundary")
-            if lb and lb.get("type") == "press":
-                old_val = lb["press"]
-                new_val = surface_pressures[species_name]
-                if old_val != new_val:
-                    lb["press"] = new_val
+    for entry in data.get("particles", []):
+        entry["RH-condensation"] = rh_cond_val
+
+    with open(settings_yaml_path, "w") as f:
+        yaml.dump(data, f)
+
+def apply_rundir_to_opacities_yaml(rundir, settings_yaml_path):
+    """
+    Prefixes the rundir (case_name) to each data filename in the opacities section of the YAML file.
+    """
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    yaml.width = 4096  # Prevent linebreaks in long flow style lists
+
+    with open(settings_yaml_path, "r") as f:
+        data = yaml.load(f)
+
+
+    from ruamel.yaml.comments import CommentedSeq
+    opacities = data.get("opacities", {})
+    for opacity_name, opacity_info in opacities.items():
+        if "data" in opacity_info and isinstance(opacity_info["data"], list):
+            new_data = CommentedSeq()
+            for fname in opacity_info["data"]:
+                # Only add rundir if not already present
+                if not fname.startswith(f"{rundir}/"):
+                    new_data.append(f"{rundir}/" + fname)
+                else:
+                    new_data.append(fname)
+            new_data.fa.set_flow_style()
+            opacity_info["data"] = new_data
 
     with open(settings_yaml_path, "w") as f:
         yaml.dump(data, f)

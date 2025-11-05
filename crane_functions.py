@@ -11,12 +11,15 @@ import pandas as pd
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions, layer2level_1var, calc_pressure_atm_tensor
 from photochem_utils import calc_dxdt, run_photochem_init, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
 
+torch.set_default_dtype(torch.float64)
+
 Rgas_SI = 8.314462618  # J/(mol K)
 k2ndOrder = 2
 k4thOrder = 4
 kExtrapolate = 0
 kConstant = 1
 N_avo = 6.022e23
+kb_SI = Rgas_SI/N_avo
 
 def cgs_to_si_pressure(p_cgs):
     return p_cgs * 0.1  # dyn/cm² to Pa
@@ -308,10 +311,10 @@ def make_radius_dict(yaml_filename, particles_with_new_radius, default_aero_radi
 
     return radius_dict
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file):
-    photo_dens = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file)
+def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, case_name):
+    photo_dens, cond_loss, cond_production = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name)
     config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename)
+    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, case_name)
 
     dxdt_dict = calc_dxdt(
         photo_dens,
@@ -331,7 +334,7 @@ def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filen
         shared=shared
     )
 
-    return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc
+    return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc, cond_loss, cond_production
 
 def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_alt_grid):
 
@@ -356,9 +359,7 @@ def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_k
             print(f"Warning: {photo_key} or {harp_key} not found in dxdt_dict or atm.")
     return x_atm_all, atm
 
-def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff):
-    Tmin = 100
-    Tmax = 400
+def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, dyn_T_cutoff, Tmin, Tmax):
     atm["temp"] += dTdt_atm * dt_dyn
     #dt_min_atm = torch.min(torch.abs(atm["temp"] / dTdt_atm))
 
@@ -467,19 +468,20 @@ def calc_latent_heat_dT(condensate_properties, Tprime, atm, options):
 #calculate the precipitation rate falling out of the column
 #k_cond in photochem should be set so that the vp0 follows the SVP(T0) (rh=1)
 #then we assume all precip falls out to bring the parcel to the SVP(Tprime)
-def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key):
-    pressure = calc_pressure_atm_tensor(atm, options)
+def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key, rh_condensation):
     dz = atm["dz"]
-    vp0 = atm[condensate_harp_key] * pressure #use the real vapor pressure that the condensate was at, don't assume saturation
+    vp0 = atm[condensate_harp_key] * atm['pres'] #use the real vapor pressure that the condensate was at, don't assume saturation
     rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * atm["temp"])  # partial density of the species in the parcel
-    svp_prime = condensate_properties.saturation_data.sat_pressure(new_temps)
+    svp_prime = rh_condensation * condensate_properties.saturation_data.sat_pressure(new_temps) # we use damp condensation, not rh=1 by default
     rho_sat_prime = (svp_prime * condensate_properties.saturation_data.mu) / (Rgas_SI * new_temps)  # partial density of the species in the parcel at T'
     amd_layer = (rho_sat0 - rho_sat_prime) * dz #amd = aerial mass density kg/m^2
     amd_accumulated = 0
+    
     if indices_where_cooling.numel() > 0:
         for i in indices_where_cooling:
             if amd_layer[0, i] > 0: #only add if condensation occured, meaning that the temp got low enough to condense
                 amd_accumulated += amd_layer[0, i]
+                atm[condensate_harp_key][0, i] = svp_prime[0, i]/atm['pres'][0, i]
 
     return amd_accumulated / (condensate_properties.density * dt_dyn), amd_layer  #precip rate in liquid layer meters/s
 
@@ -487,7 +489,6 @@ def calc_precip_rate(atm, new_temps, options, condensate_properties, dt_dyn, ind
 #assumining radiative-convective equilibrium, all energy to drive precip comes from radiative heating
 #the moving average of the real precip rate should always equal the pseudo precip rate, at least while evaporation is energetically free
 def calc_pseudo_precip_rate(atm, old_temps, new_temps, options, condensate_properties, dt_dyn, indices_where_cooling):
-    pressure = calc_pressure_atm_tensor(atm, options)
     dz = atm["dz"]
     vp0 = condensate_properties.saturation_data.sat_pressure(old_temps)  # Saturation vapor pressure at T0
     rho_sat0 = (vp0 * condensate_properties.saturation_data.mu) / (Rgas_SI * old_temps)  # partial density of the species in the parcel
@@ -503,7 +504,7 @@ def calc_pseudo_precip_rate(atm, old_temps, new_temps, options, condensate_prope
     return amd_accumulated / (condensate_properties.density * dt_dyn), amd_layer  #precip rate in liquid layer meters/s
 
 #we follow Manabe and Wethereld (1967) for the convective adjustment algorithm
-def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad):
+def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, condensate_harp_key, dTdt_rad, rh_condensation, Tmin, Tmax):
     tolerance = 1.01 #to avoid numerical issues
     mmr = atm[condensate_harp_key]*(condensate_properties.saturation_data.mu/options.mean_mol_weight)  # convert molar mixing ratio to mass mixing ratio
     #MLR from Emanuel 1993, eqn 4.7.3
@@ -530,8 +531,7 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     ntries = 0
     max_ntries = 2000 # so that we don't get stuck in an infinite loop if the conv adjustment fails to converge
     while do_again and ntries < max_ntries:
-        pressure = calc_pressure_atm_tensor(atm, options)
-        plevels = layer2level(dz_btwn_levels, pressure, l2l)
+        plevels = layer2level(dz_btwn_levels, atm['pres'], l2l)
 
         for k in range(options.nlyr - 1):
             dp_k = plevels[0, k] - plevels[0, k + 1]
@@ -542,6 +542,13 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
                     + dp_kplus1 * new_temps[0, k + 1]
                 ) / (dp_k + dp_kplus1)
                 new_temps[0, k] = new_temps[0, k + 1] + lapse_rate[0, k] * dz_btwn_layers[k]
+                #make sure stays within bounds
+                if new_temps[0, k + 1] < Tmin or new_temps[0, k + 1] > Tmax:
+                    print(f"Warning (conv adj): temp at layer {k+1} clamped")
+                if new_temps[0, k] < Tmin or new_temps[0, k] > Tmax:
+                    print(f"Warning (conv adj): temp at layer {k} clamped")
+                new_temps[0, k + 1].clamp_(min=Tmin, max=Tmax)
+                new_temps[0, k].clamp_(min=Tmin, max=Tmax)
 
         for k in range(options.nlyr - 1):
             dTdz_btwn_layers[0, k] = (new_temps[0, k] - new_temps[0, k + 1]) / dz_btwn_layers[k]
@@ -559,12 +566,13 @@ def do_convective_adjustment(atm, options, condensate_properties, dt_dyn, conden
     indices_where_cooling = torch.nonzero(dT[0, :] < 0).flatten()
 
     #calc how much precip fell out of the column
-    precip_rate, amd_layer = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key)
+    precip_rate, amd_layer = calc_precip_rate(atm, new_temps[0, :].unsqueeze(0), options, condensate_properties, dt_dyn, indices_where_cooling, condensate_harp_key, rh_condensation)
 
     #psuedo_precip_rate = check_energy_balance(atm, new_temps, dTdt_rad, condensate_properties, dt_dyn, options, indices_where_cooling, precip_rate, condensate_harp_key)
     #print('pseudo precip rate: ', pseudo_precip_rate)
 
     atm["temp"][0, :] = new_temps[0, :]  # Update the temperature to the adjusted column's temperature
+
     #atm["pres"] = calc_pressure_atm_tensor(atm, options)
     return atm, precip_rate, amd_layer
 
@@ -736,15 +744,160 @@ def plot_convective_adjustment(atm_before, atm_after, precip_rate, amd_layer, fi
     fig.canvas.draw()
     plt.pause(0.001)
 
-def calc_dyn_tempstep(btemp, dTdt_surf, old_temps, new_temps, dt_dyn):
+def calc_dyn_tempstep(btemp, dTdt_surf, atm_temps, dTdt_atm, dyn_timestep_safety_factor, Tmin, Tmax):
+    
+    #in the case of cooling, we care about the max timestep you can take which gets you to the lower bound
+    dt_min_atm = torch.min(torch.abs( (atm_temps - Tmin) / dTdt_atm))
+
+    dt_min_surf = torch.min(torch.abs( (btemp - Tmin) / dTdt_surf))
+
+    dt_min = torch.min(dt_min_atm, dt_min_surf)
+
+    #in the case of heating, we care about the max timestep you can take which gets you to the upper bound
+    dt_max_atm = torch.min(torch.abs( (Tmax - atm_temps) / dTdt_atm))
+
+    dt_max_surf = torch.min(torch.abs( (Tmax - btemp) / dTdt_surf))
+
+    dt_max = torch.min(dt_max_atm, dt_max_surf)
+
+    #take whichever one is shorter
+    dt_dyn = torch.min(dt_min, dt_max).item()
+    
+    #still be conservative
+    dt_dyn = dt_dyn / dyn_timestep_safety_factor
+
+    #however, cant be too short
+    if dt_dyn < 0.01:
+        dt_dyn = 0.01
+        print('Warning in calc_dyn_timestep: the model is getting very unstable and the timestep is very short. You should check what is going on.')
+
+    return dt_dyn
+
+def calc_dyn_tempstep_old(btemp, dTdt_surf, old_temps, new_temps, dt_dyn, dyn_timestep_safety_factor):
     true_dTdt_atm = (new_temps - old_temps)/dt_dyn
     dt_min_atm = torch.min(torch.abs(new_temps / true_dTdt_atm))
 
     dt_min_surf = torch.min(torch.abs(btemp / dTdt_surf))
     
     dt_min = torch.min(dt_min_atm, dt_min_surf)
+    
+    dt_min = dt_min.item()
 
-    return dt_min.item()
+    if dt_dyn > 400000.:
+        dt_dyn = 400000.
+    if dt_dyn < 0.01:
+        dt_dyn = 0.01
+    
+    dt_dyn = dt_min / dyn_timestep_safety_factor
+
+    return dt_min
+
+def fmt(x):
+    if isinstance(x, (int, np.integer)):
+        return f"{x:12d}"
+    try:
+        return f"{float(x):12.6e}"
+    except:
+        return f"{str(x):>12}"
+
+
+#atm, grav, and mean_mol_weight are in SI
+#note this function is in cgs units until the very end, when it converts to SI
+def calc_surface_fluxes(atm, photo_intermediate_filename, grav, mean_mol_weight, aerosols_list, aero_condensed_densities, dry_vdeps):
+    
+    surface_fluxes = {}
+    pchem_file_data = load_atmosphere_file(photo_intermediate_filename)
+
+    temp_surf = atm['temp'][0, 0].item()
+    pres_surf = atm['pres'][0, 0].item()
+    air_number_dens_surf = pres_surf/(kb_SI * temp_surf) * 1e-6 #convert to cgs
+    air_rho_surf = (pres_surf * mean_mol_weight)/(Rgas_SI * temp_surf) * 0.001 #convert to cgs
+    viscosity_surf = dynamic_viscosity_air(temp_surf) #is in cgs
+    grav_cgs = grav*100 #convert to cgs
+
+    for species in aerosols_list:
+        aero_condensed_density = aero_condensed_densities[species] # is in cgs
+        radius_surf = pchem_file_data[species + '_r'][0] #is in cgs
+        fall_velocity_surf =  fall_velocity(grav_cgs, radius_surf, aero_condensed_density, air_rho_surf, viscosity_surf) #is in cgs
+        slip_correction_factor_surf = slip_correction_factor(radius_surf, air_number_dens_surf) #is in cgs
+        aero_vdep = fall_velocity_surf * slip_correction_factor_surf #is in cgs
+        gas_phase_name = species[:-3]
+        gas_phase_mr_surf = pchem_file_data[gas_phase_name][0]
+        flux = (aero_vdep * atm['x' + species][0, 0].item() + dry_vdeps[gas_phase_name] * gas_phase_mr_surf) * air_number_dens_surf * 1e4 # convert to SI at the end
+        surface_fluxes[species] = flux
+    
+    return surface_fluxes
+
+def get_aero_densities(aerosols_list, rxn_yaml_filename):
+    aero_densities = {}
+
+    for species in aerosols_list:
+        aero_condensed_density = load_particle_info(species, rxn_yaml_filename).density * 0.001 #convert to cgs
+        aero_densities[species] = aero_condensed_density
+
+    return aero_densities
+
+def get_aero_species_dry_vdeps(aerosols_list, pchem_settings_filename):
+    dry_vdeps = {}
+
+    with open(pchem_settings_filename, "r") as file:
+        data = yaml.safe_load(file)
+    boundary_conditions = data.get("boundary-conditions", [])
+    bc_dict = {item['name']: item for item in boundary_conditions}
+
+    for species in aerosols_list:
+        dry_vdep = bc_dict[species[:-3]]['lower-boundary']['vdep']
+        dry_vdeps[species[:-3]] = dry_vdep
+
+    return dry_vdeps
+
+def dynamic_viscosity_air(T):
+    """
+    Dynamic viscosity of air [dyn s / cm^2]
+    Using Sutherland’s formula, White (2006).
+    """
+    T0 = 273.0       # K
+    eta0 = 1.716e-5  # N s / m^2
+    S = 111.0        # K
+    unit_conversion = 10.0  # [dyn s/cm^2] per [N s/m^2]
+
+    eta = (unit_conversion * eta0 *
+           (T / T0) ** 1.5 *
+           (T0 + S) / (T + S))
+    return eta
+
+def slip_correction_factor(particle_radius, number_density):
+    """
+    Cunningham slip correction factor.
+    
+    Parameters
+    ----------
+    particle_radius : cm
+    number_density         : molecules / cm^3
+    """
+    area_of_molecule = 6.0e-15  # cm^2
+    # mean free path lambda
+    lam = 1.0 / (number_density * area_of_molecule)
+
+    correct_fac = 1.0 + (lam / particle_radius) * (
+        1.257 + 0.4 * np.exp(-1.1 * particle_radius / lam)
+    )
+    return correct_fac
+
+def fall_velocity(grav, particle_radius, particle_density, air_density, viscosity):
+    """
+    Gravitational settling velocity (Stokes law).
+    
+    Parameters
+    ----------
+    grav             : gravity [cm/s^2]
+    particle_radius  : radius [cm]
+    particle_density : g/cm^3
+    air_density      : g/cm^3
+    viscosity        : dyn s / cm^2
+    """
+    return ((2.0 / 9.0) * grav * particle_radius**2 *
+            (particle_density - air_density) / viscosity)
 
 if __name__ == "__main__":
     #plot_outputs("outputs_int.txt", 20, 20)  # Change window_size as needed

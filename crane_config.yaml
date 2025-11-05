@@ -2,38 +2,40 @@ case_name: nom
 
 radiation_options:
   ncol: 1
-  nlyr: 100
+  nlyr: 200
   nstr: 4
   grav: 3.711
   mean_mol_weight: 0.044
-  cv: 658
-  aerosol_scale_factor: 1.0
-  cSurf: 200000
+  cv: 658.
+  aerosol_scale_factors: [1.0, 1.0] #first slot is H2SO4aer, second is S8aer
+  cSurf: 200000.
   kappa: 2.0e-3
   surf_sw_albedo: 0.2
   sr_sun: 2.92842e-5
-  btemp0: 275
-  ttemp0: 140
-  solar_temp: 5772
+  btemp0: 275.
+  ttemp0: 140.
+  solar_temp: 5772.
   lum_scale: 0.175  # 0.7 / 4
   nspecies: 6
-  coszen: 1
-  nswbin: 200
+  coszen: 1.
+  nswbin: 200 #number of interpolation points for SW RT
   pbot: 1.33
 
-temperature_profile:
-  Tsurf_init: 275
-  Tmin_upper: 190
-  dyn_T_cutoff: 100000  # meters
+atmosphere_settings:
+  Tsurf_init: 275.
+  Tmin_upper: 190.
+  dyn_T_cutoff: 95000.  # meters
   upper_init_lapserate : 0.0  # K/m
-  kzz: 1.0e5  # cm^2/s
+  kzz: 3.0e5  # cm^2/s, 30 m^2/s, Zhang & Shownman 2018
   default_aero_radius: 1.0e-5  # cm
   aero_new_radius: 1.0e-5  # cm
-  particles_with_new_radius: ['H2SO4aer_r']
+  particles_with_new_radius: ['H2SO4aer_r', 'S8aer_r']
+  Tmin: 100.
+  Tmax: 400.
 
 cia_tempgrid:
-  Tref: 200
-  T_plusminus: 100
+  Tref: 200.
+  T_plusminus: 100.
   Tpoints: 5
 
 filenames:
@@ -44,10 +46,10 @@ filenames:
   s8_opacity: s8_mieparams_r0.1um.txt
 
 runtime:
-  do_plot: true
+  do_plot: false
   outdir_name: outputs
-  dt_dyn_init: 21600.0
-  t_lim: 315360000.0  # 10 years
+  dt_dyn_init: 10.0
+  t_lim: 31536000000.0  # 1000 years
   writeout_step: 1
   dyn_timestep_safety_factor: 100
 
@@ -56,9 +58,10 @@ species:
   harp_species: ['xCO2','xH2O','xSO2','xH2','xS8aer', 'xH2SO4aer']
   condensate_harp_key: xSO2
   condensate_name: SO2aer
+  rh_condensation: 0.7
 
 chemical_switching:
-  times_to_switch: [315360000000, 315360000000]
+  times_to_switch: [3153600000000, 31536000000000]
   do_switching_pchem_bc: false
   photo_settings_yaml_filenames: ['settings.yaml', 'settings2.yaml']
 
@@ -66,3 +69,6 @@ photochem_surface_pressures:
   CO2: 1.0e6
   H2O: 1.0e6
   H2: 0.05e6
+
+photochem_surface_fluxes:
+  SO2: 2.0e8

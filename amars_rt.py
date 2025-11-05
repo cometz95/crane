@@ -4,6 +4,7 @@ import numpy as np
 from torch import tensor, zeros, ones
 import os
 from scipy.interpolate import griddata, RegularGridInterpolator
+torch.set_num_threads(1)
 
 from pyharp import (
     constants,
@@ -16,7 +17,9 @@ from pyharp import (
 )
 
 from netCDF4 import Dataset
-from gen_new_kcoeff.rfmlib import run_cktable_one_band_CIA
+from rfmlib import run_cktable_one_band_CIA
+
+torch.set_default_dtype(torch.float64)
 
 stefanBoltzmannConst = 5.67e-8  # Stefan-Boltzmann constant (W/(m^2 K^4))
 kb_cgs = 1.380649e-16  # Boltzmann constant in erg/K
@@ -30,7 +33,7 @@ kExtrapolate = 0
 kConstant = 1
 
 class RadiationModelOptions:
-    def __init__(self, ncol, nlyr, nstr, grav, mean_mol_weight, cv, aerosol_scale_factor, cSurf, kappa, 
+    def __init__(self, ncol, nlyr, nstr, grav, mean_mol_weight, cv, aerosol_scale_factors, cSurf, kappa, 
                  surf_sw_albedo, sr_sun, btemp0, ttemp0, solar_temp,
                  lum_scale, nspecies, coszen, nswbin, pbot):
         self.ncol = ncol  # Number of columns
@@ -39,7 +42,7 @@ class RadiationModelOptions:
         self.grav = grav  # Gravitational acceleration (m/s^2)
         self.mean_mol_weight = mean_mol_weight  # Mean molecular weight (kg/mol)
         self.cv = cv  # Specific heat capacity (J/(kg K))
-        self.aerosol_scale_factor = aerosol_scale_factor  # Aerosol scaling factor
+        self.aerosol_scale_factors = aerosol_scale_factors  # Aerosol scaling factors
         self.cSurf = cSurf  # Surface thermal inertia (J/(m^2 K))
         self.kappa = kappa  # Thermal diffusivity (m^2/s)
         self.intg = {"type": "rk2"}  # Integration options (e.g., Runge-Kutta 2nd order)
@@ -55,7 +58,7 @@ class RadiationModelOptions:
         self.pbot = pbot
 
 
-def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename):
+def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, rundir):
     ncol, nlyr = alt.shape
     bc = {}
 
@@ -76,49 +79,80 @@ def config_amars_rt_init(alt, options, h2so4_opacity_filename, s8_opacity_filena
         disort_config(band.disort(), options.nstr, nlyr, ncol, nwave)
 
         if name == "SW":  # shortwave
+            co2_nc_filename = ''
             band.ww(np.linspace(wmin, wmax, nwave))
             wave = tensor(band.ww(), dtype=torch.float64)
             bc[name + "/fbeam"] = (
                 options.lum_scale * options.sr_sun * bbflux_wavenumber(wave, options.solar_temp)
-            ).expand(nwave, ncol)
+            ).to(torch.float64).expand(nwave, ncol)
             bc[name + "/albedo"] = options.surf_sw_albedo * ones(
                 (nwave, ncol), dtype=torch.float64
             )
             bc[name + "/umu0"] = options.coszen * ones((ncol,), dtype=torch.float64)
+
+            #the species IDs shouldn't be hardcoded cmetz fixme
             #h2so4
             h2so4_species_id = 4
             aero_rad_meters = aero_new_radius/100
             h2so4_species_mol_weight = 0.098
-            model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band, name)
+            model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band, name, co2_nc_filename)
             scripted = torch.jit.script(model)
-            scripted.save("h2so4-SW.pt")
+            fname = os.path.join(rundir, f"h2so4-{name}.pt")
+            scripted.save(fname)
 
             #s8
             s8_species_id = 5
             s8_species_mol_weight = 0.256
-            model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band, name)
+            model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band, name, co2_nc_filename)
             scripted = torch.jit.script(model)
-            scripted.save("s8-SW.pt")
+            fname = os.path.join(rundir, f"s8-{name}.pt")
+            scripted.save(fname)
 
         else:  # longwave
             #band.ww(band.query_weights())
+
+            #we need to pass this to get the filename when it changes in the yaml file
+            #cmetz fixme dirty fix
+            co2_nc_filename = rad_op.bands()[name].opacities()['CO2'].opacity_files()[0]
+
             band.disort().wave_lower([wmin] * nwave)
             band.disort().wave_upper([wmax] * nwave)
             bc[name + "/albedo"] = zeros((nwave, ncol), dtype=torch.float64)
             bc[name + "/temis"] = ones((nwave, ncol), dtype=torch.float64)
                         
-            model = JITCIA([0, 0], 'CO2-CO2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename) 
+            #ideally the CIAs shouldnt be hardcoded either
+            #cmetz fixme
+            model = JITCIA([0, 0], 'CO2-CO2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename, rundir) 
             scripted = torch.jit.script(model)
-            scripted.save(f"co2_co2-{name}.pt")
+            fname = os.path.join(rundir, f"co2_co2-{name}.pt")
+            scripted.save(fname)
             
-            model = JITCIA([0, 3], 'CO2-H2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename)
+            model = JITCIA([0, 3], 'CO2-H2_2018.cia', ncol, nlyr, name, band, CIA_tempgrid, rt_settings_yaml_filename, rundir)
             scripted = torch.jit.script(model)
-            scripted.save(f"co2_h2-{name}.pt")
+            fname = os.path.join(rundir, f"co2_h2-{name}.pt")
+            scripted.save(fname)
 
             op = rad_op.bands()[name].opacities()['CO2CO2CIA']
             op.jit_kwargs(["temp"])
             op = rad_op.bands()[name].opacities()['CO2H2CIA']
             op.jit_kwargs(["temp"])
+
+            #the species IDs shouldn't be hardcoded cmetz fixme
+            #h2so4 LW
+            h2so4_species_id = 4
+            h2so4_species_mol_weight = 0.098
+            model = JITAero(h2so4_species_id, h2so4_opacity_filename, options, h2so4_species_mol_weight, band, name, co2_nc_filename)
+            scripted = torch.jit.script(model)
+            fname = os.path.join(rundir, f"h2so4-{name}.pt")
+            scripted.save(fname)
+
+            #s8 LW
+            s8_species_id = 5
+            s8_species_mol_weight = 0.256
+            model = JITAero(s8_species_id, s8_opacity_filename, options, s8_species_mol_weight, band, name, co2_nc_filename)
+            scripted = torch.jit.script(model)
+            fname = os.path.join(rundir, f"s8-{name}.pt")
+            scripted.save(fname)
 
     bc["btemp"] = options.btemp0 * ones((ncol,), dtype=torch.float64)
     bc["ttemp"] = options.ttemp0 * ones((ncol,), dtype=torch.float64)
@@ -137,8 +171,8 @@ def calc_amars_rt(rad, atm, bc, options, condensate_harp_key):
     conc[:, :, 1] = atm["xH2O"]
     conc[:, :, 2] = atm[condensate_harp_key]
     conc[:, :, 3] = atm["xH2"]
-    conc[:, :, 4] = atm["xH2SO4aer"] * options.aerosol_scale_factor
-    conc[:, :, 5] = atm["xS8aer"]  * options.aerosol_scale_factor
+    conc[:, :, 4] = atm["xH2SO4aer"] * options.aerosol_scale_factors[0]
+    conc[:, :, 5] = atm["xS8aer"]  * options.aerosol_scale_factors[1]
 
     conc *= atm['pres'].unsqueeze(-1) / (constants.Rgas * atm["temp"].unsqueeze(-1))
 
@@ -389,22 +423,31 @@ def calc_p_den_scaleheight(alt, temp, options):
     return pressure, density
 
 class JITAero(torch.nn.Module):
-    def __init__(self, species_id, opacity_filename, rad_model_options, species_mol_weight, band, bname) -> torch.Tensor:
+    def __init__(self, species_id, opacity_filename, rad_model_options, species_mol_weight, band, bname, co2_nc_filename) -> torch.Tensor:
         super().__init__()
         self.bname = bname
         self.species_id = species_id
         self.opacity_filename = opacity_filename
-
-        target_wavenumber_grid = band.ww()
-
-        target_wavenumber_grid = np.array(target_wavenumber_grid)
-        self.nwave = len(target_wavenumber_grid)
         self.nlayers = rad_model_options.nlyr
+
+        if bname == 'SW':
+            target_wavenumber_grid = band.ww()
+            target_wavenumber_grid = np.array(target_wavenumber_grid, dtype=np.float64)
+        else:
+            data = Dataset(co2_nc_filename, "r")
+            target_wavenumber_grid = data.variables["Wavenumber"][:]
+            target_wavenumber_grid = np.array(target_wavenumber_grid, dtype=np.float64)
+            data.close()
+
+        self.nwave = len(target_wavenumber_grid)
+
+            #wmin = band.disort().wave_lower()[0]
+            #wmax = band.disort().wave_upper()[0]
 
         self.ncol = rad_model_options.ncol
         self.npmom = 4
         self.nprop = 2 + self.npmom
-        self.mol_weight = species_mol_weight  # kg/mol
+        self.mol_weight = torch.tensor(species_mol_weight, dtype=torch.float64)  # kg/mol
 
         self.properties = read_opacity_file(self.opacity_filename)
         wavelengths_readin = self.properties[:, 0]  # assuming first column is wavelength in microns
@@ -419,7 +462,7 @@ class JITAero(torch.nn.Module):
                 wavelength_target,  # x-coords to interpolate to (in microns)
                 wavelengths_readin, # x-coords of data (in microns)
                 self.properties[:, i]  # y-coords of data
-            )
+            ).astype(np.float64)
             interp_props.append(interp_col)
 
         # Stack: shape will be (nwave, 3)
@@ -430,23 +473,70 @@ class JITAero(torch.nn.Module):
             target_wavenumber_grid.reshape(-1, 1),  # shape (nwave, 1)
             interp_props  # shape (nwave, 3)
         ], axis=1)
+
         self.properties = torch.tensor(self.properties, dtype=torch.float64)
+        #attn coeff
+        self.properties[:, 1] = torch.where(self.properties[:, 1] < 0, torch.tensor(0.0, dtype=torch.float64, device=self.properties[:, 1].device), self.properties[:, 1])
+        self.properties[:, 1] = torch.nan_to_num(self.properties[:, 1], nan = 0.0)
+
+        #ssa
+        self.properties[:, 2] = torch.where(self.properties[:, 2] > 1, torch.tensor(0.99999, dtype=torch.float64, device=self.properties[:, 2].device), self.properties[:, 2])
+        self.properties[:, 2] = torch.where(self.properties[:, 2] < 0, torch.tensor(1e-20, dtype=torch.float64, device=self.properties[:, 2].device), self.properties[:, 2])
+        self.properties[:, 2] = torch.nan_to_num(self.properties[:, 2], nan=1.0)
+
+        #g
+        self.properties[:, 3] = torch.where(self.properties[:, 3] < -1, torch.tensor(-0.99, dtype=torch.float64, device = self.properties[:, 3].device), self.properties[:, 3])
+        self.properties[:, 3] = torch.where(self.properties[:, 3] > 1, torch.tensor(0.99, dtype=torch.float64, device = self.properties[:, 3].device), self.properties[:, 3])
+        self.properties[:, 3] = torch.nan_to_num(self.properties[:, 3], nan=0.0)
+
+        '''
+        if bname != 'SW':
+            ncfile = Dataset(lbl_nc_fname + '-' + bname + '.nc' , "w")
+
+            ncfile.createDimension("Wavenumber", nwave_lbl)
+            dim = ncfile.createVariable("Wavenumber", "f8", ("Wavenumber",))
+            dim[:] = wavenumber_axis_lbl
+            dim.long_name = "lbl wavenumber"
+            dim.units = "1/cm"
+
+            ncfile.createDimension("Pressure", len(pres))
+            dim = ncfile.createVariable("Pressure", "f8", ("Pressure",))
+            dim[:] = pres
+            dim.long_name = "reference pressure"
+            dim.units = "pa"
+
+            ncfile.createDimension("TempGrid", len(temp_anom_grid))
+            dim = ncfile.createVariable("TempGrid", "f8", ("TempGrid",))
+            dim[:] = temp_anom_grid
+            dim.long_name = "temperature anomaly grid"
+            dim.units = "K"
+
+            var = ncfile.createVariable("Temperature", "f8", ("Pressure",))
+            var[:] = ref_temp
+            var.long_name = "reference temperature"
+            var.units = "K"
+
+            var = ncfile.createVariable(
+                safe_cia_name, "f8", ("Wavenumber", "Pressure", "TempGrid")
+            )
+            var[:] = k_array
+            var.long_name = "CIA k-coefficients"
+            var.units = 'cm^5/molecule'
+            ncfile.close()
+
+            run_cktable_one_band_CIA(bname, rt_settings_yaml_filename, lbl_nc_fname, ck_nc_fname, safe_cia_name)
+        '''
 
     def forward(self, conc) -> torch.Tensor:
         res = torch.zeros((self.nwave, self.ncol, self.nlayers, self.nprop), dtype=torch.float64)
         dens = conc[:, :, self.species_id] * self.mol_weight  # convert to kg/m^3
         attn_coeff = self.properties[:, 1]
-        attn_coeff = torch.where(attn_coeff < 0, torch.tensor(0.0, dtype=attn_coeff.dtype, device=attn_coeff.device), attn_coeff)
         res[:, :, :, 0] =  attn_coeff.unsqueeze(1).unsqueeze(2) * dens.unsqueeze(0)
 
         ssa = self.properties[:, 2].unsqueeze(1).unsqueeze(2)  # shape: [nwave, 1, 1]
         ssa = ssa.expand(self.nwave, self.ncol, self.nlayers)   # shape: [nwave, ncol, nlayers]
-        ssa = torch.where(ssa > 1, torch.tensor(0.99999, dtype=ssa.dtype, device=ssa.device), ssa)
-        ssa = torch.where(ssa < 0, torch.tensor(1e-20, dtype=ssa.dtype, device=ssa.device), ssa)
         res[:, :, :, 1] = ssa
         g_array = self.properties[:, 3]
-        g_array = torch.where(g_array < -1, torch.tensor(-0.99, dtype=g_array.dtype, device = g_array.device), g_array)
-        g_array = torch.where(g_array > 1, torch.tensor(0.99, dtype=g_array.dtype, device = g_array.device), g_array)
         for i in range(self.npmom):
             #the coefficient of the legendre polynomial for the phase function are the g^i,
             #we ignore the 0th order, which is always 1 for HG
@@ -488,7 +578,7 @@ def torch_log_interp(query: torch.Tensor, coords: torch.Tensor, lookup: torch.Te
     return torch.exp(log_interp)
 
 class JITCIA(torch.nn.Module):
-    def __init__(self, species_ids, opacity_filename, ncol, nlyr, bname, band, CIA_tempgrid, rt_settings_yaml_filename):
+    def __init__(self, species_ids, opacity_filename, ncol, nlyr, bname, band, CIA_tempgrid, rt_settings_yaml_filename, rundir):
         super().__init__()
         self.species_ids = species_ids
         self.cia_tempgrid = CIA_tempgrid
@@ -503,8 +593,8 @@ class JITCIA(torch.nn.Module):
         wmax = band.disort().wave_upper()[0]
         nwave_lbl = int(round( (wmax - wmin)/0.1 ))
         wavenumber_axis_lbl = np.linspace(wmin, wmax, nwave_lbl)
-        lbl_nc_fname = 'lbl-' + safe_cia_name
-        ck_nc_fname = 'ck-' + safe_cia_name
+        lbl_nc_fname = os.path.join(rundir, 'lbl-' + safe_cia_name)
+        ck_nc_fname = os.path.join(rundir, 'ck-' + safe_cia_name)
 
         pres = np.array([100000])
         ref_temp = np.array(CIA_tempgrid[0])

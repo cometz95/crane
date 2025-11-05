@@ -14,6 +14,8 @@ from pyharp import (
     calc_dz_hypsometric
 )
 
+torch.set_default_dtype(torch.float64)
+
 # Constants for interpolation options (used in layer2level)
 k2ndOrder = 2
 k4thOrder = 4
@@ -260,7 +262,7 @@ def config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_
             # Save the interpolated values to atm[harp_key]
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
 
-def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file):
+def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name):
     update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename, photochem_rxn_file)
     photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
     photo_alt_grid = photo_atm_data["alt"]
@@ -268,7 +270,7 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
     pc = EvoAtmosphere(
     photochem_rxn_file,
     photo_settings_yaml_filename,
-    'Sun_3.5Ga_s0_4.txt',
+    'Sun_3.5Ga.txt',
     photo_intermediate_filename
     )
 
@@ -297,14 +299,18 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
 
     pc.out2atmosphere_txt(photo_intermediate_filename,overwrite=True)
 
-    return photo_alt_grid
+    pl_cond = pc.production_and_loss(cond_pchem_name, pc.wrk.usol)
+    cond_production = pl_cond.production.sum(axis=1)
+    cond_loss = pl_cond.loss.sum(axis=1)
 
-def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file):
+    return photo_alt_grid, cond_loss, cond_production
+
+def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name):
 
     pc = EvoAtmosphere(
     photochem_rxn_file,
     photo_settings_yaml_filename,
-    'Sun_3.5Ga_s0_4.txt',
+    'Sun_3.5Ga.txt',
     photo_intermediate_filename
     )
 
@@ -324,13 +330,28 @@ def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermed
     with suppress_fortran_output():
         pc.evolve(photo_binary_filename, tstart, pc.wrk.usol, np.array([dt_photo]), overwrite=True)
 
-    print(dir(pc.var))
-    print(dir(pc.wrk))
-
     #dens_hydro = pc.wrk.pressure/(pc.var.temperature * kb_cgs)
     dens_hydro = pc.wrk.density
 
-    return dens_hydro
+    pl_cond = pc.production_and_loss(cond_pchem_name, pc.wrk.usol)
+    cond_production = pl_cond.production.sum(axis=1)
+    cond_loss = pl_cond.loss.sum(axis=1)
+
+    print(dir(pc.var))
+    print(dir(pc.wrk))
+
+    return dens_hydro, cond_loss, cond_production
+
+def interp_pl_to_atm_grid(atm_alt, photo_alt_grid, cond_loss, cond_production):
+    atm_alt = atm_alt.detach().cpu().numpy().flatten() if hasattr(atm_alt, "detach") else np.array(atm_alt).flatten()
+    atm_alt = atm_alt/1e3
+    photo_alt_grid =photo_alt_grid
+
+    #convert from molecules/cm^3/s to molecules/m^3/s
+    interp_cond_loss = np.interp(atm_alt, photo_alt_grid, cond_loss) * 1e6
+    interp_cond_production = np.interp(atm_alt, photo_alt_grid, cond_production) * 1e6
+
+    return interp_cond_loss, interp_cond_production
 
 def make_atmosphere_z_grid_from_yaml(yaml_path):
     # Load YAML
@@ -467,7 +488,7 @@ def update_photochem_all(photo_intermediate_filename, new_atm, x_atm_all, photo_
     pc = EvoAtmosphere(
         photochem_rxn_file,
         photo_settings_yaml_filename,
-        'Sun_3.5Ga_s0_4.txt',
+        'Sun_3.5Ga.txt',
         photo_intermediate_filename
     )
 
@@ -755,7 +776,7 @@ def update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm
     pc = EvoAtmosphere(
         'zahnle_amars.yaml',
         photo_settings_yaml_filename,
-        'Sun_3.5Ga_s0_4.txt',
+        'Sun_3.5Ga.txt',
         photo_intermediate_filename
     )
 
