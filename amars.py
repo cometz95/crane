@@ -9,10 +9,10 @@ from tabulate import tabulate
 import argparse
 
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
-from crane_functions import (init_from_file, config_init_model, safe_euler_integrate_temperature, 
+from crane_functions import (init_from_file, init_rates, safe_euler_integrate_temperature, 
                              safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, 
                              plot_convective_adjustment, calc_dyn_tempstep, fmt, calc_surface_fluxes,
-                             get_aero_species_dry_vdeps, get_aero_densities)
+                             get_aero_species_dry_vdeps, get_aero_densities, config_amars_rt_init)
 from photochem_utils import (calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles,
                             update_p_dens, update_atm_x, interp_pl_to_atm_grid)
 from crane_yaml_loader import initialize_from_config
@@ -24,11 +24,9 @@ if __name__ == "__main__":
     parser.add_argument('yaml_file', type=str)
     args = parser.parse_args()
 
-    case_name, _ = os.path.splitext(args.yaml_file)
-    case_name = case_name.split("/", 1)[0]
-    rundir = os.path.join('/nfs/turbo/coe-chengcli/nocl4', case_name)
-
     params = initialize_from_config(args.yaml_file)
+    rundir = params['rundir']
+    case_name = params['case_name']
     options = params['options']
 
     #surface pressures of gasses must be modified directly in settings.yaml, essentially choosing their surface inventories
@@ -37,8 +35,7 @@ if __name__ == "__main__":
     photochem_rxn_file = os.path.join(rundir, params['photochem_rxn_file'])
 
     shared = {}
-    do_plot = False #if True, plots the atmosphere at each timestep
-    outdir_name = os.path.join(rundir, 'outputs')
+    outdir_name = os.path.join(rundir, params['outdir_name'])
     if not os.path.exists(outdir_name):
         os.makedirs(outdir_name)
 
@@ -57,19 +54,15 @@ if __name__ == "__main__":
     aero_species_dry_vdeps = get_aero_species_dry_vdeps(aerosols_list, photo_settings_yaml_filename)
 
     #io file names
-    init_xfrac_filebase = os.path.join(rundir, 'atmosphere_init_stable.txt')
-
     photo_init_filename = os.path.join(rundir, 'atmosphere_init' + f'_{case_name}' + '.txt')
     #photo_init_filename = 'atmosphere_init_stable.txt'
     intermediate_filename = os.path.join(rundir, 'atmosphere_intermediate' + f'_{case_name}')
     photo_intermediate_filename = os.path.join(rundir, intermediate_filename + '.txt')
     photo_binary_filename = os.path.join(rundir, intermediate_filename + '.bin')
     final_photo_state_filename = os.path.join(rundir, f'atmosphere_final_{case_name}.txt')
-    outputs_intermediate_name = os.path.join(rundir, f'outputs_intermediate_{case_name}.txt')
     outputs_final_name = os.path.join(rundir, f'outputs_final_{case_name}.txt')
     final_plot_name = os.path.join(rundir, f'atmosphere_plot_final_{case_name}.png')
 
-    shutil.copy(init_xfrac_filebase, photo_init_filename)
     outputs = {
         "tot_time": [],
         "surface_temp": [],
@@ -77,16 +70,19 @@ if __name__ == "__main__":
         "atm": []
     }
 
-    #species_to_init = ['SO2','SO2aer','SO3','H2O','H2Oaer','H2SO4','H2SO4aer','SO','O','S','H2S','CO2','CO2aer','S8','S8aer']
+    #here we either create a new start file or use an existing one
     water_condensate_properties = load_particle_info("H2Oaer", photochem_rxn_file)
-    z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, params['lower_init_lapserate'], params['upper_init_lapserate'], 
-                                          params['Tsurf_init'], params['Tmin_upper'], options, params['keys_to_init'], water_condensate_properties, params['aero_new_radius'], params['kzz'], params['default_aero_radius'], params['H2mr'])
+    if params['gen_new_init_atm']:
+        z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, params['lower_init_lapserate'], params['upper_init_lapserate'], params['Tsurf_init'], params['Tmin_upper'], options, params['keys_to_init'], water_condensate_properties, params['aero_new_radius'], params['kzz'], params['default_aero_radius'], params['H2mr'], photochem_rxn_file)
+    else:
+        photo_init_filename = params['pchem_start_file']
     shutil.copy(photo_init_filename, photo_intermediate_filename)
-    temp, pres, xfrac, atm, x_atm_all = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key) # Load the initial atmosphere from the photochem file
-    dxdt_dict, dTdt_atm, dTdt_surf, rad, bc, cond_loss, cond_production = config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, 
-                                                                options, params['pchem_species_dict'], params['harp_species_dict'], params['dt_dyn_init'], shared, do_plot, photo_settings_yaml_filename,
-                                                                params['h2so4_opacity_filename'], params['s8_opacity_filename'], condensate_harp_key, params['aero_new_radius'], params['CIA_tempgrid'], 
-                                                                rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, rundir)
+
+    #then we do some stuff to load in the files and initialize the RT and photochem models
+    temp, pres, xfrac, atm, x_atm_all, species_ids = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key, params['pchem_species_dict'], params['harp_species_dict'])
+        #the below function can be modified to initialize the dT/dt and dx/dt rates, which can be used, if we want to move in the direction of calling the photochem every N timesteps instead of every 1
+    rad, bc = init_rates(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, params['pchem_species_dict'], params['harp_species_dict'], params['dt_dyn_init'], shared, params['do_plot'], photo_settings_yaml_filename, params['species_opacity_files_list'], condensate_harp_key, params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, rundir, species_ids, params["cia_opacity_files_list"], params["gen_new_cia_cktables"])
+    #rad, bc = config_amars_rt_init(atm, options, params['species_opacity_files_list'], params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, rundir, species_ids, params["cia_opacity_files_list"], params["gen_new_cia_cktables"])
     atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
 
     step = 0
@@ -100,11 +96,11 @@ if __name__ == "__main__":
 
     tot_time = 0.0
     while tot_time < t_lim:
-        #each step proceeds in this order:
-        #call radiation, do heating
+        #each timestep of the loop proceeds in this order:
+        #call radiation, calc adaptive timestep, do heating
         #call photochem, update mixing ratios (setting initial condensate mixing ratio before convective adjustment)
         #then do convective adjustment, and calc precip due to cooling
-        netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options, condensate_harp_key)
+        netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options, condensate_harp_key, params['harp_species_dict'])
         dTdt_atm, dTdt_surf = calc_dTdt(
             netflux=netflux,
             downward_flux=downward_flux,
@@ -119,7 +115,7 @@ if __name__ == "__main__":
         #atm_before_convadj = copy.deepcopy(atm)
 
         photo_alt_grid, cond_loss, cond_production = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, 
-                                                                                   photo_intermediate_filename, atm, dt_dyn, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name)
+                                                                                   photo_intermediate_filename, atm, dt_dyn, params['do_plot'], photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, params['pchem_sun_spectrum_file'])
         dxdt_dict = calc_dxdt(
             photo_dens,
             photo_binary_filename,
@@ -136,8 +132,6 @@ if __name__ == "__main__":
             malr_condensate_key = condensate_harp_key
             malr_condensate_properties = condensate_properties
         atm, precip_rate, amd_layer = do_convective_adjustment(atm, options, malr_condensate_properties, dt_dyn, malr_condensate_key, dTdt_atm, params["rh_condensation"], params['Tmin'], params['Tmax'])
-        #old janky method, function is saved as calc_dt_timestep_old
-        #dt_min = calc_dyn_tempstep(bc["btemp"], dTdt_surf, atm_old_temps["temp"], atm["temp"], dt_dyn, params['dyn_timestep_safety_factor'])
         atm_old_temps = copy.deepcopy(atm)
 
         atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
@@ -194,5 +188,5 @@ if __name__ == "__main__":
         #print('precip rate: ',precip_rate)
 
 
-    print('model finished successffully after ' + str(tot_time) + ' seconds')
+    print('model finished successfully after ' + str(tot_time) + ' seconds')
     shutil.copy(photo_intermediate_filename, final_photo_state_filename)

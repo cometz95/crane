@@ -2,12 +2,12 @@ case_name: nom
 
 radiation_options:
   ncol: 1
-  nlyr: 200
+  nlyr: 240
   nstr: 4
   grav: 3.711
   mean_mol_weight: 0.044
   cv: 658.
-  aerosol_scale_factors: [1.0, 1.0] #first slot is H2SO4aer, second is S8aer
+  aerosol_scale_factors: [1.0, 1.0] #this list must be ordered the same as your aerosol species below in harp_species. leave it empty if no aerosols
   cSurf: 200000.
   kappa: 2.0e-3
   surf_sw_albedo: 0.2
@@ -18,8 +18,9 @@ radiation_options:
   lum_scale: 0.175  # 0.7 / 4
   nspecies: 6
   coszen: 1.
-  nswbin: 200 #number of interpolation points for SW RT
+  nswbin: 500 #number of interpolation points for SW RT
   pbot: 1.33
+  nmom: 4
 
 atmosphere_settings:
   Tsurf_init: 275.
@@ -32,30 +33,38 @@ atmosphere_settings:
   particles_with_new_radius: ['H2SO4aer_r', 'S8aer_r']
   Tmin: 100.
   Tmax: 400.
+  gen_new_init_atm: True
+  pchem_start_file: '' #atmosphere_intermediate.txt
 
 cia_tempgrid:
   Tref: 200.
   T_plusminus: 100.
   Tpoints: 5
+  gen_new_cia_cktables: True
 
 filenames:
   photo_settings_yaml: settings.yaml
-  rt_settings_yaml: amars-ck.yaml
-  photochem_rxn_file: zahnle_amars.yaml
-  h2so4_opacity: h2so4_mieparams_r0.1um.txt
-  s8_opacity: s8_mieparams_r0.1um.txt
+  rt_settings_yaml: amars-ck_SO2.yaml
+  photochem_rxn_file: zahnle_amars_nocl.yaml
+  species_opacity_files_list: ['ck-h2_25-so2-3bar-<band>.nc','ck-h2_25-so2-3bar-<band>.nc','ck-h2_25-so2-3bar-<band>.nc','ck-h2_25-so2-3bar-<band>.nc','h2so4_mieparams_r0.1um.txt', 's8_mieparams_r0.1um.txt']
+  cia_opacity_files_list: ['CO2-CO2_2018.cia', 'CO2-H2_2018.cia']
+  pchem_sun_spectrum_file: Sun_3.5Ga.txt
+  #compiled outfiles for aerosol species opacities are named {harp_key}-{band}.pt
+  #compiled outfiles for cia opacities are named {species1}_{species2}-{band}.pt
 
 runtime:
-  do_plot: false
+  do_plot: True
+  rundir: ''
   outdir_name: outputs
-  dt_dyn_init: 10.0
+  dt_dyn_init: 0.01
   t_lim: 31536000000.0  # 1000 years
   writeout_step: 1
   dyn_timestep_safety_factor: 100
 
+#the order of these lists must match the order of your species list in your RT yaml file!
 species:
-  pchem_species: ['CO2','H2O','SO2','H2','S8aer', 'H2SO4aer']
-  harp_species: ['xCO2','xH2O','xSO2','xH2','xS8aer', 'xH2SO4aer']
+  pchem_species: ['CO2','H2O','SO2','H2', 'H2SO4aer', 'S8aer'] 
+  harp_species: ['xCO2','xH2O','xSO2','xH2', 'xH2SO4aer', 'xS8aer']
   condensate_harp_key: xSO2
   condensate_name: SO2aer
   rh_condensation: 0.7

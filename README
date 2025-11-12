@@ -13,7 +13,16 @@ https://github.com/Nicholaswogan/photochem
 
 
 
-issues:
+setting up RT requires you to adhere to some specific conventions.
 
-right now, need to kill amars.py (main) with kill -9 PID
-when running multiple processes of the model on one computer (multiple threads), photochem sometimes tries to access and hd5 file at the same time, which causes a crash. to prevent this, type this "export HDF5_USE_FILE_LOCKING=FALSE" before you execute your main
+in the RT yaml file:
+1. the species list must be ordered in the same way as your harp_keys/pchem keys in your crane-config file
+2. the jit aerosol opacity files must be called {species}-{band}.pt (species in lowercase)
+3. the jit cia aerosol opacity files must be called {species1}_{species2}-{band} (species in lowercase)
+
+in the crane-config file:
+1. see #1 above
+2. the aerosol input file list must be ordered in the same way that the aerosols are ordered in the harp_keys list
+
+
+by default, when you simulate RT out of range of your known input aerosol/CIA data, the attn coeff is set to 0 for extrapolation. 

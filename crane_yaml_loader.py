@@ -31,6 +31,15 @@ def initialize_from_config(config_path):
     upper_init_lapserate = atmset['upper_init_lapserate']
     Tmin = atmset['Tmin']
     Tmax = atmset['Tmax']
+    gen_new_init_atm = atmset['gen_new_init_atm']
+    pchem_start_file = atmset['pchem_start_file']
+
+    condition_1 = gen_new_init_atm and (pchem_start_file == "")
+    condition_2 = (not gen_new_init_atm) and (pchem_start_file != "")
+
+    assert condition_1 or condition_2, (
+        "when gen_new_init_atm is True, pchem_start_file must be a blank string. when gen_new_init_atm is false, you must provide the startfile for photochem"
+    )
 
     lower_init_lapserate = (options.grav / options.cv) * 1000
 
@@ -39,14 +48,16 @@ def initialize_from_config(config_path):
     T_plusminus = config["cia_tempgrid"]["T_plusminus"]
     Tpoints = config["cia_tempgrid"]["Tpoints"]
     CIA_tempgrid = (Tref, T_plusminus, Tpoints)
+    gen_new_cia_cktables = config["cia_tempgrid"]["gen_new_cia_cktables"]
 
     # === File names ===
     files = config["filenames"]
     photo_settings_yaml_filename = files["photo_settings_yaml"]
     rt_settings_yaml_filename = files["rt_settings_yaml"]
     photochem_rxn_file = files["photochem_rxn_file"]
-    h2so4_opacity_filename = files["h2so4_opacity"]
-    s8_opacity_filename = files["s8_opacity"]
+    species_opacity_files_list = files["species_opacity_files_list"]
+    pchem_sun_spectrum_file = files["pchem_sun_spectrum_file"]
+    cia_opacity_files_list = files["cia_opacity_files_list"]
 
     # === Runtime settings ===
     runtime = config["runtime"]
@@ -56,10 +67,8 @@ def initialize_from_config(config_path):
     t_lim = runtime["t_lim"]
     writeout_step = runtime["writeout_step"]
     dyn_timestep_safety_factor = runtime["dyn_timestep_safety_factor"]
-
-    if not os.path.exists(os.path.join(case_name,outdir_name)):
-        os.makedirs(os.path.join(case_name, outdir_name))
-
+    rundir = runtime['rundir']
+    
     # === Species ===
     species = config["species"]
     pchem_species_dict = species["pchem_species"]
@@ -79,15 +88,16 @@ def initialize_from_config(config_path):
     molec_per_particle_dict = compute_molecules_per_particle(photochem_rxn_file, radius_dict)
     condensate_properties = load_particle_info(condensate_name, photochem_rxn_file)
 
-    update_boundary_conditions(os.path.join('/nfs/turbo/coe-chengcli/nocl4/' + case_name, photo_settings_yaml_filename), config["photochem_surface_pressures"], config["photochem_surface_fluxes"])
+    update_boundary_conditions(os.path.join(rundir, photo_settings_yaml_filename), config["photochem_surface_pressures"], config["photochem_surface_fluxes"])
     
-    #rh_condensation = config["species"]["rh_condensation"]
-    #apply_rh_cond_to_settings(
-    #    rh_condensation,
-    #    os.path.join('/nfs/turbo/coe-chengcli/nocl4/' + case_name, photo_settings_yaml_filename)
-    #)
-
-    apply_rundir_to_opacities_yaml('/nfs/turbo/coe-chengcli/nocl4/' + case_name, '/nfs/turbo/coe-chengcli/nocl4/'+ case_name + '/' + rt_settings_yaml_filename)
+    rh_condensation = config["species"]["rh_condensation"]
+    apply_rh_cond_to_settings(
+        rh_condensation,
+        os.path.join(rundir, photo_settings_yaml_filename)
+    )
+    
+    if rundir != '':
+        apply_rundir_to_opacities_yaml(rundir, os.path.join(rundir, rt_settings_yaml_filename))
 
     H2mr = float(config["photochem_surface_pressures"]['H2'])/float(config["photochem_surface_pressures"]['CO2'])
 
@@ -105,8 +115,7 @@ def initialize_from_config(config_path):
         "photo_settings_yaml_filename": photo_settings_yaml_filename,
         "rt_settings_yaml_filename": rt_settings_yaml_filename,
         "photochem_rxn_file": photochem_rxn_file,
-        "h2so4_opacity_filename": h2so4_opacity_filename,
-        "s8_opacity_filename": s8_opacity_filename,
+        "species_opacity_files_list": species_opacity_files_list,
         "do_plot": do_plot,
         "outdir_name": outdir_name,
         "dt_dyn_init": dt_dyn_init,
@@ -126,9 +135,15 @@ def initialize_from_config(config_path):
         "do_switching_pchem_bc": do_switching_pchem_bc,
         "times_to_switch": times_to_switch,
         "photo_settings_yaml_filenames": photo_settings_yaml_filenames,
-        "rh_condensation": 0.7,
+        "rh_condensation": rh_condensation,
         "Tmin": Tmin,
         "Tmax": Tmax,
+        "rundir": rundir,
+        "gen_new_init_atm": gen_new_init_atm,
+        "pchem_start_file": pchem_start_file,
+        "pchem_sun_spectrum_file": pchem_sun_spectrum_file,
+        "cia_opacity_files_list": cia_opacity_files_list,
+        "gen_new_cia_cktables": gen_new_cia_cktables,
     }
 
 from ruamel.yaml import YAML

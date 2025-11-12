@@ -262,7 +262,7 @@ def config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_
             # Save the interpolated values to atm[harp_key]
             atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
 
-def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name):
+def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, pchem_sun_spectrum_file):
     update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename, photochem_rxn_file)
     photo_atm_data = load_atmosphere_file(photo_intermediate_filename)
     photo_alt_grid = photo_atm_data["alt"]
@@ -270,7 +270,7 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
     pc = EvoAtmosphere(
     photochem_rxn_file,
     photo_settings_yaml_filename,
-    'Sun_3.5Ga.txt',
+    pchem_sun_spectrum_file,
     photo_intermediate_filename
     )
 
@@ -305,6 +305,7 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
 
     return photo_alt_grid, cond_loss, cond_production
 
+#only difference is that it does not save
 def run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name):
 
     pc = EvoAtmosphere(
@@ -426,9 +427,10 @@ def initialize_species_profiles_to0(all_keys, keys_to_init, temp, pres, condensa
 
     return species_profiles
 
-def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr):
-    old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
-
+#create a new atmosphere file from scratch, in the same format that Nick uses in photochem
+def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lower, lapserate_upper, Tsurf, T_min, options, keys_to_init, water_condensate_properties, aero_new_radius, kzz, default_aero_radius, H2mr, photochem_rxn_file):
+    #old_chem_atmosphere_data = load_atmosphere_file(photo_intermediate_filename)
+    
     # Compute new altitude grid at layer centers
     z_centers, z_levels = make_atmosphere_z_grid_from_yaml(yaml_path)
     temp = Tsurf - lapserate_lower * z_centers
@@ -444,27 +446,53 @@ def init_photochem_profiles(photo_intermediate_filename, yaml_path, lapserate_lo
     #the below is essentially only used as a guess for calculating total atmospheric mass
     p, dens = calc_p_den_scaleheight(z_centers_tensor, temp_tensor, options)
 
-    updates = {
+    atmosphere_dict={
         "alt": z_centers,
         "temp": temp,
         "press": p/1e6, #convert dynes/cm^2 to bar
         "den": dens,
-        "eddy": np.ones_like(dens) * kzz
+        "eddy": np.ones_like(dens) * kzz                       
     }
 
+    #need to read the species keys in from zahnle file
+    with open(photochem_rxn_file, 'r') as file:
+        data = yaml.safe_load(file)
+
+    #getting gas species names
+    species_names = [species.get('name') for species in data.get('species')]
+    species_entries = {
+        name: np.ones_like(z_centers) * 1e-40
+        for name in species_names
+    }
+    atmosphere_dict.update(species_entries)
+    
+    #getting particle names and their radius
+    particle_names = [particle.get('name') for particle in data.get('particles')]
+    particle_entries = {}
+    for name in particle_names:
+        particle_entries[name] = np.ones_like(z_centers) * 1e-40 
+    
+        radius_key = name + "_r"
+        particle_entries[radius_key] = np.ones_like(z_centers) * 1e-40 # Use the same placeholder for consistency
+
+    atmosphere_dict.update(particle_entries)
+
+
     #converting p from dynes/cm^2 to Pa
-    #species_profiles = initialize_species_profiles(species_keys, temp, p/10, water_condensate_properties, aero_new_radius, blank_value=1e-40)
-    all_keys = old_chem_atmosphere_data.keys()
+    all_keys = atmosphere_dict.keys()
     species_profiles = initialize_species_profiles_to0(all_keys, keys_to_init, temp, p/10, water_condensate_properties, aero_new_radius, default_aero_radius, H2mr, blank_value=1e-40)
 
+    updates = {}
     for species, profile in species_profiles.items():
         updates[species] = profile
 
     modify_atmospheric_parameters(
-        old_chem_atmosphere_data,
+        atmosphere_dict,
         updates,
         output_filepath=photo_intermediate_filename
     )
+
+    print(f'Writing new atmosphere file to {photo_intermediate_filename}')
 
     return z_levels
 
@@ -774,7 +802,7 @@ def update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm
     update_photochem_all(photo_intermediate_filename, atm, x_atm_all, photo_settings_yaml_filename, photochem_rxn_file)
 
     pc = EvoAtmosphere(
-        'zahnle_amars.yaml',
+        photochem_rxn_file,
         photo_settings_yaml_filename,
         'Sun_3.5Ga.txt',
         photo_intermediate_filename

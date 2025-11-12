@@ -311,11 +311,12 @@ def make_radius_dict(yaml_filename, particles_with_new_radius, default_aero_radi
 
     return radius_dict
 
-def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, h2so4_opacity_filename, s8_opacity_filename, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, case_name):
-    photo_dens, cond_loss, cond_production = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name)
-    config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm["alt"], options, h2so4_opacity_filename, s8_opacity_filename, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, case_name)
+def init_rates(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, aero_opacity_files_list, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, case_name, species_ids, cia_opacity_files_list, gen_new_cia_cktables):
+    #photo_dens, cond_loss, cond_production = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name)
+    #config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
+    rad, bc = config_amars_rt_init(atm, options, aero_opacity_files_list, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, case_name, species_ids, cia_opacity_files_list, gen_new_cia_cktables)
 
+    '''
     dxdt_dict = calc_dxdt(
         photo_dens,
         photo_binary_filename,
@@ -333,8 +334,10 @@ def config_init_model(x_atm_all, photo_binary_filename, photo_intermediate_filen
         options=options,
         shared=shared
     )
+    '''
 
-    return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc, cond_loss, cond_production
+    #return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc, cond_loss, cond_production
+    return rad, bc
 
 def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_alt_grid):
 
@@ -391,7 +394,7 @@ def safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, optio
 
     return atm, bc
 
-def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
+def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key, pchem_keys, harp_keys):
     """
     Initialize atmospheric state from a photochem file.
 
@@ -426,6 +429,7 @@ def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
     xfrac = torch.zeros((options.ncol, options.nlyr), dtype=torch.float64)
 
     # Build atm dictionary (species order must match your convention)
+    '''
     atm = {
         "alt": alt,
         "dz": dz_between_levels,
@@ -437,6 +441,40 @@ def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
         "xH2SO4aer": xfrac[:, :],
         "xS8aer": xfrac[:, :]
     }
+    '''
+    atm = {
+        "alt": alt,
+        "dz": dz_between_levels,
+        "temp": temp,
+    }
+    species_ids = {}
+
+    for pchem_key, harp_key in zip(pchem_keys, harp_keys):
+        # Perform interpolation to match the harp pressure grid
+        interpolated_values = np.interp(
+            atm["alt"].squeeze().cpu().numpy(),
+            file_alt * 1e3,  # convert km to m
+            np.array(chem_atmosphere_data[pchem_key]) 
+        )
+
+        # Save the interpolated values to atm[harp_key]
+        atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
+
+    for i, (pchem_key, harp_key) in enumerate(zip(pchem_keys, harp_keys)):
+
+        # Perform interpolation to match the harp pressure grid
+        interpolated_values = np.interp(
+            atm["alt"].squeeze().cpu().numpy(),
+            file_alt * 1e3,  # convert km to m
+            np.array(chem_atmosphere_data[pchem_key]) 
+        )
+
+        # Save the interpolated values to atm[harp_key]
+        atm[harp_key] = torch.tensor(interpolated_values).unsqueeze(0)
+        
+        # Assign the enumerated species_id 'i' using the harp_key
+        species_ids[harp_key] = i
+
     #the below is essentially only used as a guess for calculating total atmospheric mass
     pressure = calc_pressure_atm_tensor(atm, options)
     atm["pres"] = pressure
@@ -448,7 +486,7 @@ def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key):
         if key not in exclude_keys and not key.endswith("_r"):
             x_atm_all[key] = torch.tensor(chem_atmosphere_data[key], dtype=torch.float64).unsqueeze(0).expand(options.ncol, -1).contiguous()
 
-    return temp, alt, xfrac, atm, x_atm_all
+    return temp, alt, xfrac, atm, x_atm_all, species_ids
 
 #Tprime = new_temps
 #T0 = atm["temp"]
