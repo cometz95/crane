@@ -63,7 +63,7 @@ opacities:
     data: [xH2SO4aer-<band>.pt]
     species: [H2SO4]
     nmom: 4
-    
+
   S8:
     type: jit
     data: [xS8aer-<band>.pt]

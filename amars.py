@@ -7,14 +7,16 @@ import numpy as np
 import os
 from tabulate import tabulate
 import argparse
+import glob
 
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
 from crane_functions import (init_from_file, init_rates, safe_euler_integrate_temperature, 
                              safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, 
                              plot_convective_adjustment, calc_dyn_tempstep, fmt, calc_surface_fluxes,
-                             get_aero_species_dry_vdeps, get_aero_densities, config_amars_rt_init)
+                             get_aero_species_dry_vdeps, get_aero_densities, config_amars_rt_init,
+                             init_main_nc, write_step_nc, merge_ncs)
 from photochem_utils import (calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles,
-                            update_p_dens, update_atm_x, interp_pl_to_atm_grid)
+                            update_p_dens, update_atm_x, interp_pl_to_atm_grid, calc_zlevels_from_file)
 from crane_yaml_loader import initialize_from_config
 
 torch.set_default_dtype(torch.float64)
@@ -36,8 +38,13 @@ if __name__ == "__main__":
 
     shared = {}
     outdir_name = os.path.join(rundir, params['outdir_name'])
+    outdir_name = os.path.abspath(outdir_name)
     if not os.path.exists(outdir_name):
         os.makedirs(outdir_name)
+    else: 
+        files = glob.glob(os.path.join(outdir_name, '*'))
+        for f in files:
+            os.remove(f)
 
     #for now, make the timesteps all equal
     # otherwise, the code is setup so that dt_rad and dt_photo must be multiples of dt_dyn
@@ -76,6 +83,7 @@ if __name__ == "__main__":
         z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, params['lower_init_lapserate'], params['upper_init_lapserate'], params['Tsurf_init'], params['Tmin_upper'], options, params['keys_to_init'], water_condensate_properties, params['aero_new_radius'], params['kzz'], params['default_aero_radius'], params['H2mr'], photochem_rxn_file)
     else:
         photo_init_filename = params['pchem_start_file']
+        z_levels_km = calc_zlevels_from_file(params['pchem_start_file'])
     shutil.copy(photo_init_filename, photo_intermediate_filename)
 
     #then we do some stuff to load in the files and initialize the RT and photochem models
@@ -95,6 +103,7 @@ if __name__ == "__main__":
     atm_old_temps = copy.deepcopy(atm)
 
     tot_time = 0.0
+    init_main_nc(params["out_filename"], atm, bc)
     while tot_time < t_lim:
         #each timestep of the loop proceeds in this order:
         #call radiation, calc adaptive timestep, do heating
@@ -114,8 +123,7 @@ if __name__ == "__main__":
         atm, bc = safe_euler_integrate_temperature(dTdt_atm, dTdt_surf, atm, bc, dt_dyn, options, params['dyn_T_cutoff'], params['Tmin'], params['Tmax'])
         #atm_before_convadj = copy.deepcopy(atm)
 
-        photo_alt_grid, cond_loss, cond_production = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, 
-                                                                                   photo_intermediate_filename, atm, dt_dyn, params['do_plot'], photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, params['pchem_sun_spectrum_file'])
+        photo_alt_grid, cond_loss, cond_production = run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_dyn, params['do_plot'], photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, params['pchem_sun_spectrum_file'])
         dxdt_dict = calc_dxdt(
             photo_dens,
             photo_binary_filename,
@@ -140,6 +148,7 @@ if __name__ == "__main__":
         #precip_rate_list.append(precip_rate)
         #plot_convective_adjustment(atm_before_convadj, atm_after_convadj, precip_rate_list, amd_layer, fig, axs, options)
         
+        '''
         if step % params['writeout_step'] == 0:
             step_filename = "output_" + f"{case_name}_{step}.csv"
 
@@ -175,6 +184,20 @@ if __name__ == "__main__":
             rows = [' '.join(r) for r in df_fmt.values.astype(str)]
             with open(outdir_name + '/' + step_filename.replace('.csv', '.txt'), 'w') as f:
                 f.write(header + '\n' + '\n'.join(rows))
+            
+            #write_step_nc(outdir_name + '/' + step_filename.replace('.csv', '.nc'), tot_time, atm, bc, precip_rate, cond_loss, cond_production, surface_fluxes)
+        '''
+
+        if step % params['writeout_step'] == 0:
+            step_nc_file = os.path.join(outdir_name, f"output_{case_name}_{step}.nc")
+
+            cond_loss, cond_production = interp_pl_to_atm_grid(atm['alt'], photo_alt_grid, cond_loss, cond_production)
+            surface_fluxes = calc_surface_fluxes(atm, photo_intermediate_filename, options.grav, options.mean_mol_weight, aerosols_list, aero_condensed_densities, aero_species_dry_vdeps)
+
+            write_step_nc(step_nc_file, tot_time, atm, bc, precip_rate, cond_loss, cond_production, surface_fluxes)
+
+        if step % params['merge_step'] == 0:
+            merge_ncs(params["out_filename"], outdir_name)
 
         tot_time += dt_dyn
         step += 1

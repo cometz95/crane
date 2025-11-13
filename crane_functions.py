@@ -7,6 +7,9 @@ from pyharp import (constants,calc_dz_hypsometric)
 import matplotlib.pyplot as plt
 import re
 import pandas as pd
+import glob
+import xarray as xr
+import os
 
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions, layer2level_1var, calc_pressure_atm_tensor
 from photochem_utils import calc_dxdt, run_photochem_init, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
@@ -429,19 +432,6 @@ def init_from_file(photo_filename, options, z_levels_km, condensate_harp_key, pc
     xfrac = torch.zeros((options.ncol, options.nlyr), dtype=torch.float64)
 
     # Build atm dictionary (species order must match your convention)
-    '''
-    atm = {
-        "alt": alt,
-        "dz": dz_between_levels,
-        "temp": temp,
-        "xCO2": xfrac[:, :],
-        "xH2O": xfrac[:, :],
-        condensate_harp_key: xfrac[:, :],
-        "xH2": xfrac[:, :],
-        "xH2SO4aer": xfrac[:, :],
-        "xS8aer": xfrac[:, :]
-    }
-    '''
     atm = {
         "alt": alt,
         "dz": dz_between_levels,
@@ -936,6 +926,71 @@ def fall_velocity(grav, particle_radius, particle_density, air_density, viscosit
     """
     return ((2.0 / 9.0) * grav * particle_radius**2 *
             (particle_density - air_density) / viscosity)
+
+def init_main_nc(filename, atm, bc):
+    alt = np.array(atm['alt']).flatten()
+    data = {'time': [0.0], 'alt': alt}
+
+    # 1D variables
+    data['precip_rate'] = ('time', [0.0])
+    data['surface_temp'] = ('time', [float(bc['btemp'])])
+    data['tot_time'] = ('time', [0.0])
+
+    # 2D variables
+    data['cond_loss'] = (('time', 'alt'), [np.zeros_like(alt)])
+    data['cond_production'] = (('time', 'alt'), [np.zeros_like(alt)])
+
+    # atm variables
+    for k, v in atm.items():
+        if k == 'alt': continue
+        arr = np.array(v).flatten()
+        data[k] = (('time','alt'), [arr])
+
+    xr.Dataset(data).to_netcdf(filename, mode='w', format='NETCDF4')
+
+def write_step_nc(filename, tot_time, atm, bc, precip_rate, cond_loss, cond_prod, surf_fluxes):
+    alt = np.array(atm['alt']).flatten()
+    data = {'time': [tot_time], 'alt': alt,
+            'surface_temp': ('time', [float(bc['btemp'])]),
+            'precip_rate': ('time', [float(precip_rate)]),
+            'tot_time': ('time', [float(tot_time)]),
+            'cond_loss': (('time','alt'), [cond_loss]),
+            'cond_production': (('time','alt'), [cond_prod])}
+
+    for k, v in atm.items():
+        if k == 'alt': continue
+        arr = np.array(v).flatten()
+        data[k] = (('time','alt'), [arr])
+
+    for k, v in surf_fluxes.items():
+        data[k[:-3]+'_sflx'] = ('time', [v])
+
+    xr.Dataset(data).to_netcdf(filename, mode='w', format='NETCDF4')
+
+def merge_ncs(main_nc, outdir):
+    files = sorted([f for f in glob.glob(os.path.join(outdir, "*.nc")) if os.path.abspath(f) != os.path.abspath(main_nc)])
+    if not files:
+        return
+
+    # Open small step files and concatenate
+    ds_list = [xr.open_dataset(f) for f in files]
+    merged_small = xr.concat(ds_list, dim="time", join='override')
+
+    # Safely append to main_nc
+    with xr.open_dataset(main_nc) as main:
+        final = xr.concat([main, merged_small], dim="time", join='override')
+    
+    # Close everything before writing
+    merged_small.close()
+    for ds in ds_list:
+        ds.close()
+
+    final.to_netcdf(main_nc, mode='w', format='NETCDF4')
+    final.close()
+
+    # Remove small step files
+    for f in files:
+        os.remove(f)
 
 if __name__ == "__main__":
     #plot_outputs("outputs_int.txt", 20, 20)  # Change window_size as needed

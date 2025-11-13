@@ -853,6 +853,17 @@ def update_atm_x(atm, photo_keys, harp_keys, photo_intermediate_filename):
 
     return atm
 
+def calc_zlevels_from_file(infile):
+    zlevels = []
+    data = load_atmosphere_file(infile)
+    alt = data["alt"]
+    dz = alt[1] - alt[0]
+    zlevels.append(alt[0] - dz/2)
+    for l in range(len(alt)):
+        zlevels.append(zlevels[l] + dz)
+    
+    return zlevels
+
 # Example usage
 if __name__ == "__main__":
     #old_filepath = "atmosphere_init.txt"

@@ -41,25 +41,30 @@ cia_tempgrid:
   T_plusminus: 100.
   Tpoints: 5
   gen_new_cia_cktables: True
+  
 
 filenames:
-  photo_settings_yaml: settings.yaml
+  photo_settings_yaml: settings.yaml #you can supply an absolute path here or supply rundir below. if using rundir, it is assumed that all of these live in there, besides the opacity files
   rt_settings_yaml: amars-ck_SO2.yaml
   photochem_rxn_file: zahnle_amars_nocl.yaml
   species_opacity_files_list: ['ck-h2_25-so2-3bar-<band>.nc','ck-h2_25-so2-3bar-<band>.nc','ck-h2_25-so2-3bar-<band>.nc','ck-h2_25-so2-3bar-<band>.nc','h2so4_mieparams_r0.1um.txt', 's8_mieparams_r0.1um.txt']
   cia_opacity_files_list: ['CO2-CO2_2018.cia', 'CO2-H2_2018.cia']
   pchem_sun_spectrum_file: Sun_3.5Ga.txt
+  out_filename: 'out.nc'
   #compiled outfiles for aerosol species opacities are named {harp_key}-{band}.pt
   #compiled outfiles for cia opacities are named {species1}_{species2}-{band}.pt
 
 runtime:
-  do_plot: True
+  do_plot: False
   rundir: ''
-  outdir_name: outputs
+  outdir_name: outputs #creates a new folder inside rundir
   dt_dyn_init: 0.01
   t_lim: 31536000000.0  # 1000 years
   writeout_step: 1
+  merge_step: 10
   dyn_timestep_safety_factor: 100
+  running_batches_from_template: False #will insert some paths for you in your yaml file, assuming your yaml files are copied from a template each time
+  opacity_dir_name: 'datadir' #this dir will be prepended to the filepaths in your yaml file if you are running batches, otherwise it is assumed you supply absolute path in your yaml file
 
 #the order of these lists must match the order of your species list in your RT yaml file!
 species:

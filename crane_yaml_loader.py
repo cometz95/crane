@@ -58,6 +58,7 @@ def initialize_from_config(config_path):
     species_opacity_files_list = files["species_opacity_files_list"]
     pchem_sun_spectrum_file = files["pchem_sun_spectrum_file"]
     cia_opacity_files_list = files["cia_opacity_files_list"]
+    out_filename = files["out_filename"]
 
     # === Runtime settings ===
     runtime = config["runtime"]
@@ -66,9 +67,12 @@ def initialize_from_config(config_path):
     dt_dyn_init = runtime["dt_dyn_init"]
     t_lim = runtime["t_lim"]
     writeout_step = runtime["writeout_step"]
+    merge_step = runtime["merge_step"]
     dyn_timestep_safety_factor = runtime["dyn_timestep_safety_factor"]
     rundir = runtime['rundir']
-    
+    running_batches_from_template = runtime['running_batches_from_template']
+    opacity_dir_name = runtime['opacity_dir_name']
+
     # === Species ===
     species = config["species"]
     pchem_species_dict = species["pchem_species"]
@@ -96,8 +100,8 @@ def initialize_from_config(config_path):
         os.path.join(rundir, photo_settings_yaml_filename)
     )
     
-    if rundir != '':
-        apply_rundir_to_opacities_yaml(rundir, os.path.join(rundir, rt_settings_yaml_filename))
+    if running_batches_from_template:
+        apply_dir_to_opacities_yaml(opacity_dir_name, os.path.join(rundir, rt_settings_yaml_filename))
 
     H2mr = float(config["photochem_surface_pressures"]['H2'])/float(config["photochem_surface_pressures"]['CO2'])
 
@@ -144,6 +148,10 @@ def initialize_from_config(config_path):
         "pchem_sun_spectrum_file": pchem_sun_spectrum_file,
         "cia_opacity_files_list": cia_opacity_files_list,
         "gen_new_cia_cktables": gen_new_cia_cktables,
+        "running_batches_from_template": running_batches_from_template,
+        "opacity_dir_name": opacity_dir_name,
+        "out_filename": out_filename,
+        "merge_step": merge_step,
     }
 
 from ruamel.yaml import YAML
@@ -198,15 +206,15 @@ def apply_rh_cond_to_settings(rh_cond_val, settings_yaml_path):
     with open(settings_yaml_path, "w") as f:
         yaml.dump(data, f)
 
-def apply_rundir_to_opacities_yaml(rundir, settings_yaml_path):
+def apply_dir_to_opacities_yaml(opacity_dir_name, yaml_path):
     """
-    Prefixes the rundir (case_name) to each data filename in the opacities section of the YAML file.
+    Prefixes the opacity_dir_name to each data filename in the opacities section of the YAML file.
     """
     yaml = YAML()
     yaml.preserve_quotes = True
     yaml.width = 4096  # Prevent linebreaks in long flow style lists
 
-    with open(settings_yaml_path, "r") as f:
+    with open(yaml_path, "r") as f:
         data = yaml.load(f)
 
 
@@ -216,13 +224,13 @@ def apply_rundir_to_opacities_yaml(rundir, settings_yaml_path):
         if "data" in opacity_info and isinstance(opacity_info["data"], list):
             new_data = CommentedSeq()
             for fname in opacity_info["data"]:
-                # Only add rundir if not already present
-                if not fname.startswith(f"{rundir}/"):
-                    new_data.append(f"{rundir}/" + fname)
+                # Only add opacity_dir_name if not already present
+                if not fname.startswith(f"{opacity_dir_name}/"):
+                    new_data.append(f"{opacity_dir_name}/" + fname)
                 else:
                     new_data.append(fname)
             new_data.fa.set_flow_style()
             opacity_info["data"] = new_data
 
-    with open(settings_yaml_path, "w") as f:
+    with open(yaml_path, "w") as f:
         yaml.dump(data, f)

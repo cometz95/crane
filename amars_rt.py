@@ -179,15 +179,9 @@ def calc_amars_rt(rad, atm, bc, options, condensate_harp_key, harp_keys):
         
     ncol, nlyr = atm["alt"].shape
 
+    #here are the dims of conc
     conc = zeros((ncol, nlyr, options.nspecies), dtype=torch.float64)
-    '''
-    conc[:, :, 0] = atm["xCO2"]
-    conc[:, :, 1] = atm["xH2O"]
-    conc[:, :, 2] = atm[condensate_harp_key]
-    conc[:, :, 3] = atm["xH2"]
-    conc[:, :, 4] = atm["xH2SO4aer"] * options.aerosol_scale_factors[0]
-    conc[:, :, 5] = atm["xS8aer"]  * options.aerosol_scale_factors[1]
-    '''
+    
     current_aero_index = 0
     num_aerosols = len(options.aerosol_scale_factors)
     
@@ -670,6 +664,7 @@ class JITCIA(torch.nn.Module):
             ncfile.close()
 
             run_cktable_one_band_CIA(bname, rt_settings_yaml_filename, lbl_nc_fname, ck_nc_fname, safe_cia_name)
+            os.remove(lbl_nc_fname + '-' + bname + '.nc')
 
         with Dataset(ck_nc_fname + '-' + bname + '.nc' , "r") as nc:
             nweights = len(nc.variables["weights"][:])
@@ -686,6 +681,9 @@ class JITCIA(torch.nn.Module):
         self.register_buffer('k_vals', k_vals)
         self.register_buffer('ck_temp_axis', ck_temp_axis)
         self.register_buffer('temp_anom_grid', temp_anom_grid)
+        
+        #if gen_new_cia_cktables:
+        #    os.remove(ck_nc_fname + '-' + bname + '.nc')
 
     def forward(self, conc, temp) -> torch.Tensor:
 
