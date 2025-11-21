@@ -1,7 +1,7 @@
 atmosphere-grid:
   bottom: 0.0 # cm
   top: 1.2e7 # cm
-  number-of-layers: 120
+  number-of-layers: 300
 
 planet:
   #P_surf: 0.5 #bars

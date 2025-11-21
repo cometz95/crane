@@ -33,6 +33,7 @@ def initialize_from_config(config_path):
     Tmax = atmset['Tmax']
     gen_new_init_atm = atmset['gen_new_init_atm']
     pchem_start_file = atmset['pchem_start_file']
+    pchem_nlyr = atmset["pchem_nlyr"]
 
     condition_1 = gen_new_init_atm and (pchem_start_file == "")
     condition_2 = (not gen_new_init_atm) and (pchem_start_file != "")
@@ -107,6 +108,8 @@ def initialize_from_config(config_path):
 
     H2mr = float(config["photochem_surface_pressures"]['H2'])/float(config["photochem_surface_pressures"]['CO2'])
 
+    update_pchem_nlyr(os.path.join(rundir, photo_settings_yaml_filename), pchem_nlyr)
+
     return {
         "case_name": case_name,
         "options": options,
@@ -155,6 +158,7 @@ def initialize_from_config(config_path):
         "out_filename": out_filename,
         "merge_step": merge_step,
         "bulk_condensate_key": bulk_condensate_key,
+        "pchem_nlyr": pchem_nlyr
     }
 
 from ruamel.yaml import YAML
@@ -240,3 +244,22 @@ def apply_dir_to_opacities_yaml(opacity_dir_name, yaml_path):
 
     with open(yaml_path, "w") as f:
         yaml.dump(data, f)
+
+def update_pchem_nlyr(settings_yaml_path, pchem_nlyr):
+    yaml = YAML()
+    yaml.preserve_quotes = True
+
+    with open(settings_yaml_path, "r") as f:
+        data = yaml.load(f)
+
+    # Update the number of layers
+    if "atmosphere-grid" in data:
+        data["atmosphere-grid"]["number-of-layers"] = pchem_nlyr
+    else:
+        raise KeyError("Key 'atmosphere-grid' not found in YAML file.")
+
+    # Save YAML
+    with open(settings_yaml_path, "w") as f:
+        yaml.dump(data, f)
+
+    

@@ -2,7 +2,7 @@ case_name: nom
 
 radiation_options:
   ncol: 1
-  nlyr: 240
+  nlyr: 120
   nstr: 4
   grav: 3.711
   mean_mol_weight: 0.044
@@ -35,6 +35,7 @@ atmosphere_settings:
   Tmax: 400.
   gen_new_init_atm: False
   pchem_start_file: 'start_skip_1bar_noh2.txt' #atmosphere_intermediate.txt
+  pchem_nlyr: 120
 
 cia_tempgrid:
   Tref: 200.
