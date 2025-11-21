@@ -79,6 +79,7 @@ def initialize_from_config(config_path):
     harp_species_dict = species["harp_species"]
     condensate_harp_key = species["condensate_harp_key"]
     condensate_name = species["condensate_name"]
+    bulk_condensate_key = species["bulk_condensate_key"]
 
     # === Chemical switching ===
     chem = config["chemical_switching"]
@@ -97,7 +98,8 @@ def initialize_from_config(config_path):
     rh_condensation = config["species"]["rh_condensation"]
     apply_rh_cond_to_settings(
         rh_condensation,
-        os.path.join(rundir, photo_settings_yaml_filename)
+        os.path.join(rundir, photo_settings_yaml_filename),
+        bulk_condensate_key
     )
     
     if running_batches_from_template:
@@ -152,6 +154,7 @@ def initialize_from_config(config_path):
         "opacity_dir_name": opacity_dir_name,
         "out_filename": out_filename,
         "merge_step": merge_step,
+        "bulk_condensate_key": bulk_condensate_key,
     }
 
 from ruamel.yaml import YAML
@@ -193,7 +196,7 @@ def update_boundary_conditions(file_path, pressures, fluxes):
     with open(file_path, "w") as file:
         yaml.dump(yaml_data, file)
 
-def apply_rh_cond_to_settings(rh_cond_val, settings_yaml_path):
+def apply_rh_cond_to_settings(rh_cond_val, settings_yaml_path, bulk_condensate_key):
     yaml = YAML()
     yaml.preserve_quotes = True
 
@@ -201,7 +204,10 @@ def apply_rh_cond_to_settings(rh_cond_val, settings_yaml_path):
         data = yaml.load(f)
 
     for entry in data.get("particles", []):
-        entry["RH-condensation"] = rh_cond_val
+        if entry["name"] == bulk_condensate_key + "aer":
+            entry["RH-condensation"] = 1.0
+        else:
+            entry["RH-condensation"] = rh_cond_val
 
     with open(settings_yaml_path, "w") as f:
         yaml.dump(data, f)

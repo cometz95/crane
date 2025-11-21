@@ -151,7 +151,7 @@ def plot_chem_each_timestep_pressure(pc, options):
     fig.canvas.draw()
     plt.pause(0.001)  # <-- This line allows KeyboardInterrupt to be processed
 
-def plot_chem_each_timestep_alt(pc, options, photo_info):
+def plot_chem_each_timestep_alt(pc, options, photo_info, atm_alt):
     import matplotlib.pyplot as plt
     photo_alt_grid = photo_info["alt"]
     photo_press = photo_info["press"]
@@ -175,7 +175,7 @@ def plot_chem_each_timestep_alt(pc, options, photo_info):
 
     sol = pc.mole_fraction_dict()
     species = ['SO2','SO2aer','H2SO4','H2SO4aer', 'H2O','H2Oaer','CO2','CO2aer','H2']
-    N2 = calc_brunt_vaisala_frequency_alt(pc.var.temperature, photo_info, options)
+    N2 = calc_brunt_vaisala_frequency_alt(pc.var.temperature, photo_info, options, atm_alt)
 
     # Plot T-P profile
     if hasattr(pc.var, "temperature") and hasattr(pc.wrk, "pressure"):
@@ -292,7 +292,8 @@ def run_photochem_onestep_andplot(x_atm_all, options, photo_binary_filename, pho
 
     if do_plot:
         #plot_chem_each_timestep_pressure(pc, options)
-        plot_chem_each_timestep_alt(pc, options, photo_atm_data)
+        atm_alt = atm["alt"][0,:]
+        plot_chem_each_timestep_alt(pc, options, photo_atm_data, atm_alt)
     
     #need to modify the enclosing function argument to pass fig and axs before using the below rh plotter
     #plot_rh_each_timestep(pc, fig, axs)
@@ -655,10 +656,11 @@ def modify_atmospheric_parameters(atmosphere_data, updates, output_filepath):
     except Exception as e:
         print(f"Error saving modified atmosphere file: {e}")
 
+#this function is not used
 #input pressure is in pa, output is in km
 def calc_altitude_profile(pres, temp, options):
     dz_btwn_levels = calc_dz_hypsometric(
-        pres, temp, torch.tensor(options.mean_mol_weight * options.grav / constants.Rgas)
+        pres, temp, options.mean_mol_weight * options.grav / constants.Rgas
     )
     l2l = Layer2LevelOptions(order = k2ndOrder)
     dz_btwn_layers = layer2level(dz_btwn_levels, dz_btwn_levels, l2l) #interpolate the normal dz, which is dist between levels, so that we have the distance between layer centers
@@ -669,15 +671,16 @@ def calc_altitude_profile(pres, temp, options):
 
     return altitude_profile
 
-def calc_potential_temperature(temperature, pressure, options):
-    Rd = constants.Rgas / options.mean_mol_weight
+def calc_potential_temperature(temperature, pressure, options, cv_on_pchem_alt, mol_weight_on_pchem_alt):
+    Rd = constants.Rgas / mol_weight_on_pchem_alt
     p0 = pressure[0]
-    theta = temperature * (p0 / pressure) ** (Rd / options.cv)
+    theta = temperature * (p0 / pressure) ** (Rd / cv_on_pchem_alt)
     return theta
 
+'''
 def calc_brunt_vaisala_frequency(temperature, pressure, options):
     g = options.grav
-    theta = calc_potential_temperature(temperature, pressure, options)
+    theta = calc_potential_temperature(temperature, pressure, options, cv_on_pchem_alt)
     Rd = constants.Rgas / options.mean_mol_weight
     
     pressure_t = torch.tensor(pressure, dtype=torch.float64).unsqueeze(0)
@@ -692,13 +695,28 @@ def calc_brunt_vaisala_frequency(temperature, pressure, options):
 
     N2 = (g / theta) * dtheta / dz
     return N2
+'''
 
-def calc_brunt_vaisala_frequency_alt(temperature, photo_info, options):
+def calc_brunt_vaisala_frequency_alt(temperature, photo_info, options, atm_alt):
     g = options.grav
     pressure = np.array(photo_info["press"])*1e5
     alt = torch.tensor(photo_info["alt"])
     dz_layers = (alt[1:] - alt[:-1])*1000
-    theta = calc_potential_temperature(photo_info["temp"], pressure, options)
+
+    cv_np = options.cv[0,:].detach().cpu().numpy()
+    mw_np = options.mean_mol_weight[0,:].detach().cpu().numpy()
+
+    cv_on_pchem_alt = np.interp(alt,
+                                atm_alt.detach().cpu().numpy()/1000,
+                                cv_np
+                                )
+    
+    mol_weight_on_pchem_alt = np.interp(alt,
+                                atm_alt.detach().cpu().numpy()/1000,
+                                mw_np
+                                )
+
+    theta = calc_potential_temperature(photo_info["temp"], pressure, options, cv_on_pchem_alt, mol_weight_on_pchem_alt)
 
     l2l = Layer2LevelOptions(order=k2ndOrder)
     dz = layer2level_1var(dz_layers, l2l)

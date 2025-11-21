@@ -7,8 +7,8 @@ radiation_options:
   grav: 3.711
   mean_mol_weight: 0.044
   cv: 658.
-  aerosol_scale_factors: [1.0, 1.0] #this list must be ordered the same as your aerosol species below in harp_species. leave it empty if no aerosols
-  cSurf: 200000.
+  aerosol_scale_factors: [10.0, 10.0] #this list must be ordered the same as your aerosol species below in harp_species. leave it empty if no aerosols
+  cSurf: 2.
   kappa: 2.0e-3
   surf_sw_albedo: 0.2
   sr_sun: 2.92842e-5
@@ -25,7 +25,7 @@ radiation_options:
 atmosphere_settings:
   Tsurf_init: 275.
   Tmin_upper: 190.
-  dyn_T_cutoff: 95000.  # meters
+  dyn_T_cutoff: 75000.  # meters
   upper_init_lapserate : 0.0  # K/m
   kzz: 3.0e5  # cm^2/s, 30 m^2/s, Zhang & Shownman 2018
   default_aero_radius: 1.0e-5  # cm
@@ -33,8 +33,8 @@ atmosphere_settings:
   particles_with_new_radius: ['H2SO4aer_r', 'S8aer_r']
   Tmin: 100.
   Tmax: 400.
-  gen_new_init_atm: True
-  pchem_start_file: '' #atmosphere_intermediate.txt
+  gen_new_init_atm: False
+  pchem_start_file: 'start_skip_1bar_noh2.txt' #atmosphere_intermediate.txt
 
 cia_tempgrid:
   Tref: 200.
@@ -55,14 +55,14 @@ filenames:
   #compiled outfiles for cia opacities are named {species1}_{species2}-{band}.pt
 
 runtime:
-  do_plot: False
+  do_plot: True
   rundir: ''
   outdir_name: outputs #creates a new folder inside rundir
   dt_dyn_init: 0.01
   t_lim: 31536000000.0  # 1000 years
   writeout_step: 1
   merge_step: 10
-  dyn_timestep_safety_factor: 100
+  dyn_timestep_safety_factor: 1
   running_batches_from_template: False #will insert some paths for you in your yaml file, assuming your yaml files are copied from a template each time
   opacity_dir_name: 'datadir' #this dir will be prepended to the filepaths in your yaml file if you are running batches, otherwise it is assumed you supply absolute path in your yaml file
 
@@ -73,6 +73,7 @@ species:
   condensate_harp_key: xSO2
   condensate_name: SO2aer
   rh_condensation: 0.7
+  bulk_condensate_key: CO2
 
 chemical_switching:
   times_to_switch: [3153600000000, 31536000000000]
@@ -80,9 +81,10 @@ chemical_switching:
   photo_settings_yaml_filenames: ['settings.yaml', 'settings2.yaml']
 
 photochem_surface_pressures:
-  CO2: 1.0e6
+  CO2: 4.5e6
   H2O: 1.0e6
-  H2: 0.05e6
+  H2: 0.05e0
 
 photochem_surface_fluxes:
-  SO2: 2.0e8
+  SO2: 2.0e1
+  H2S: 2.0e13

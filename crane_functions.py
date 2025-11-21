@@ -12,7 +12,7 @@ import xarray as xr
 import os
 
 from amars_rt import calc_amars_rt, config_amars_rt_init, calc_dTdt, layer2level, Layer2LevelOptions, layer2level_1var, calc_pressure_atm_tensor
-from photochem_utils import calc_dxdt, run_photochem_init, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile
+from photochem_utils import calc_dxdt, run_photochem_init, config_x_atm_from_photochem, load_atmosphere_file, calc_altitude_profile, modify_atmospheric_parameters
 
 torch.set_default_dtype(torch.float64)
 
@@ -273,6 +273,7 @@ def load_particle_info(particle_name, yaml_filename):
     # Pass the full species list for cp lookup
     return SpeciesInfo(particle, data.get('species', []))
 
+#right now we don't use this function. if you do, just make sure you change the default of mu = 74 if we cant find it
 def compute_molecules_per_particle(yaml_filename, radius_dict):
     particle_info_dict = load_all_particle_info(yaml_filename)
     result = {}
@@ -317,7 +318,7 @@ def make_radius_dict(yaml_filename, particles_with_new_radius, default_aero_radi
 def init_rates(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, pchem_species_dict, harp_species_dict, dt_photo, shared, do_plot, photo_settings_yaml_filename, aero_opacity_files_list, condensate_harp_key, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, case_name, species_ids, cia_opacity_files_list, gen_new_cia_cktables):
     #photo_dens, cond_loss, cond_production = run_photochem_init(x_atm_all, options, photo_binary_filename, photo_intermediate_filename, atm, dt_photo, do_plot, photo_settings_yaml_filename, photochem_rxn_file, cond_pchem_name)
     #config_x_atm_from_photochem(atm, photo_intermediate_filename, pchem_species_dict, harp_species_dict)
-    rad, bc = config_amars_rt_init(atm, options, aero_opacity_files_list, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, case_name, species_ids, cia_opacity_files_list, gen_new_cia_cktables)
+    rad, bc, species_mol_weights = config_amars_rt_init(atm, options, aero_opacity_files_list, aero_new_radius, CIA_tempgrid, rt_settings_yaml_filename, case_name, species_ids, cia_opacity_files_list, gen_new_cia_cktables)
 
     '''
     dxdt_dict = calc_dxdt(
@@ -340,7 +341,7 @@ def init_rates(x_atm_all, photo_binary_filename, photo_intermediate_filename, at
     '''
 
     #return dxdt_dict, dTdt_atm, dTdt_surf, rad, bc, cond_loss, cond_production
-    return rad, bc
+    return rad, bc, species_mol_weights
 
 def safe_euler_integrate_mixing_ratio(dxdt_dict, atm, dt_dyn, photo_keys, harp_keys, x_atm_all, photo_alt_grid):
 
@@ -839,7 +840,7 @@ def calc_surface_fluxes(atm, photo_intermediate_filename, grav, mean_mol_weight,
     temp_surf = atm['temp'][0, 0].item()
     pres_surf = atm['pres'][0, 0].item()
     air_number_dens_surf = pres_surf/(kb_SI * temp_surf) * 1e-6 #convert to cgs
-    air_rho_surf = (pres_surf * mean_mol_weight)/(Rgas_SI * temp_surf) * 0.001 #convert to cgs
+    air_rho_surf = (pres_surf * mean_mol_weight[0, 0].item())/(Rgas_SI * temp_surf) * 0.001 #convert to cgs
     viscosity_surf = dynamic_viscosity_air(temp_surf) #is in cgs
     grav_cgs = grav*100 #convert to cgs
 
@@ -967,8 +968,18 @@ def write_step_nc(filename, tot_time, atm, bc, precip_rate, cond_loss, cond_prod
 
     xr.Dataset(data).to_netcdf(filename, mode='w', format='NETCDF4')
 
+def extract_num(path):
+    base = os.path.basename(path)
+    number_str = base.rsplit("_", 1)[-1].replace(".nc", "")
+    return int(number_str)
+
 def merge_ncs(main_nc, outdir):
-    files = sorted([f for f in glob.glob(os.path.join(outdir, "*.nc")) if os.path.abspath(f) != os.path.abspath(main_nc)])
+    files = sorted(
+        [f for f in glob.glob(os.path.join(outdir, "*.nc"))
+        if os.path.abspath(f) != os.path.abspath(main_nc)],
+        key=extract_num
+    )
+    #files = sorted([f for f in glob.glob(os.path.join(outdir, "*.nc")) if os.path.abspath(f) != os.path.abspath(main_nc)])
     if not files:
         return
 
@@ -991,6 +1002,113 @@ def merge_ncs(main_nc, outdir):
     # Remove small step files
     for f in files:
         os.remove(f)
+
+#we assume that only the radiatively active gasses participate in the calculation of the heat capacity
+#this should be a good assumption, since most of the bulk gasses in the atmosphere should play some part in the radiation
+#even nitrogen should participate in a CIA, so should show up in the atm
+
+def calc_cv_list(photo_keys, photochem_rxn_file, species_mol_weights, bulk_condensate_key):
+    with open(photochem_rxn_file, "r") as f:
+        data = yaml.safe_load(f)
+
+    species_data_list = {s["name"]: s for s in data.get("species", [])}
+
+    cp_model_list = []
+
+    for i, species in enumerate(photo_keys):
+        if species.endswith("aer"):
+            species = species[:-3]
+        species_entry = species_data_list.get(species)
+        if not species_entry or "thermo" not in species_entry:
+            raise ValueError(f"No thermo data found for species '{species}'")
+
+        thermo = species_entry["thermo"]
+
+        temperature_ranges = thermo["temperature-ranges"]
+        shomate_data = thermo["data"]
+
+        cp_model = ShomateCp(species_mol_weights[i], temperature_ranges, shomate_data)
+
+        cp_model_list.append(cp_model)
+    
+    if bulk_condensate_key != '':
+        bulk_condensate_properties = load_particle_info(bulk_condensate_key + "aer", photochem_rxn_file)
+        cp_model_list.append(bulk_condensate_properties)
+
+    return cp_model_list
+
+
+
+def calc_cv(cp_model_list, atm, species_mol_weights, harp_keys, bulk_condensate_key):
+    bulk_condensate_harp_key = "x" + bulk_condensate_key
+    cv = torch.zeros_like(atm["temp"])
+    mu_bar = torch.zeros_like(atm["temp"])
+
+    for i, key in enumerate(harp_keys):
+        cp_val = cp_model_list[i].cp(atm["temp"])          #calc cp(T)
+        cv_val = cp_val - Rgas_SI / species_mol_weights[i] #convert to cv
+        cv += atm[key] * cv_val  * species_mol_weights[i]
+        
+        mu_bar += atm[key] * species_mol_weights[i]
+
+        if key == bulk_condensate_harp_key:
+            svp = cp_model_list[-1].saturation_data.sat_pressure(atm["temp"])
+            rh = ((atm[bulk_condensate_harp_key] * atm["pres"])/svp)[0]
+            if torch.any(rh > 1.0):
+                indices_where_saturated = torch.where(rh > 1.0)[0]
+                l = cp_model_list[-1].saturation_data.latent_heat(atm["temp"])
+                Rv = Rgas_SI/species_mol_weights[i]
+                lh_cv_term = (atm[bulk_condensate_harp_key] * l * species_mol_weights[i])/atm["temp"] * ((l/(Rv * atm["temp"])) - 1)
+                for index in indices_where_saturated:
+                    cv[0, index] += lh_cv_term[0, index]
+
+    cv = cv/mu_bar
+
+    return cv, mu_bar
+
+def check_and_rebin_startfile(photo_intermediate_filename, photo_settings_yaml_filename):
+    pchem_file_data = load_atmosphere_file(photo_intermediate_filename)
+    old_nlyr_photo = len(pchem_file_data['press'])
+
+    with open(photo_settings_yaml_filename, 'r') as f:
+        settings = yaml.safe_load(f)
+    grid = settings['atmosphere-grid']
+    z_bot = float(grid['bottom'])/1e5   #convert to km
+    z_top = float(grid['top'])/1e5      #convert to km
+    nlyr_new = int(grid['number-of-layers'])
+
+    if old_nlyr_photo != nlyr_new:
+        print(f"Rebinning photochem start file from {old_nlyr_photo} to {nlyr_new} layers.")
+        pchem_file_data_rebinned = rebin_atmosphere_data(pchem_file_data, nlyr_new, z_bot, z_top)
+        modify_atmospheric_parameters(pchem_file_data_rebinned , {}, output_filepath=photo_intermediate_filename)
+
+# Rebin the atmosphere data, and make everything constant above and below any alt that was not previously defined
+def rebin_atmosphere_data(pchem_file_data, nlyr_new, z_bot, z_top):
+    old_alt = np.array(pchem_file_data['alt'])
+    old_zbot = old_alt[0]
+    old_ztop = old_alt[-1]
+
+    # make the new alt grid
+    z_levels = np.linspace(z_bot, z_top, nlyr_new + 1)
+    dz_btwn_levels = np.diff(z_levels)
+    z_centers = np.zeros(nlyr_new)
+    z_centers[0] = dz_btwn_levels[0] / 2
+    for i in range(1, nlyr_new):
+        z_centers[i] = np.sum(dz_btwn_levels[:i]) + dz_btwn_levels[i] / 2
+    new_alt = z_centers
+
+    rebinned_data = {}
+    for key, values in pchem_file_data.items():
+        if key == 'alt':
+            rebinned_data[key] = new_alt
+            continue
+        else:
+            old_values = np.array(values)
+            interp_values = np.interp(new_alt, old_alt, old_values, left=old_values[0], right=old_values[-1])
+            rebinned_data[key] = interp_values
+
+    return rebinned_data
+
 
 if __name__ == "__main__":
     #plot_outputs("outputs_int.txt", 20, 20)  # Change window_size as needed

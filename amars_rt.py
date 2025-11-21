@@ -172,7 +172,7 @@ def config_amars_rt_init(atm, options, species_opacity_files_list, aero_new_radi
 
     # construct radiation model
     rad = Radiation(rad_op)
-    return rad, bc
+    return rad, bc, species_mol_weights
 
 def calc_amars_rt(rad, atm, bc, options, condensate_harp_key, harp_keys):
     dz = atm["dz"]
@@ -239,9 +239,10 @@ def calc_dTdt(netflux, downward_flux, atm, bc, options, shared):
     # Density at levels
     l2l = Layer2LevelOptions(order=k2ndOrder)
     rhoh = layer2level(dz, rho.log(), l2l).exp()
-
+    cv_levels = layer2level(dz, options.cv, l2l)
+   
     # Thermal diffusion flux
-    thermal_flux = -options.kappa * rhoh * options.cv * dTdz
+    thermal_flux = -options.kappa * rhoh * cv_levels * dTdz
     shared["result/thermal_diffusion_flux"] = thermal_flux
 
     # Atmospheric temperature change (dT_atm)
@@ -418,6 +419,7 @@ def calc_pressure_atm_tensor(atm, options):
 
     return pressure
 
+#this is not used
 #alt and temp are on layers
 #alt in km
 #pbot in bars

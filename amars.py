@@ -12,10 +12,10 @@ import glob
 from amars_rt import RadiationModelOptions, calc_amars_rt, calc_dTdt, JITAero
 from crane_functions import (init_from_file, init_rates, safe_euler_integrate_temperature, 
                              safe_euler_integrate_mixing_ratio, do_convective_adjustment, load_particle_info, 
-                             plot_convective_adjustment, calc_dyn_tempstep, fmt, calc_surface_fluxes,
+                             plot_convective_adjustment, calc_dyn_tempstep, calc_surface_fluxes,
                              get_aero_species_dry_vdeps, get_aero_densities, config_amars_rt_init,
-                             init_main_nc, write_step_nc, merge_ncs)
-from photochem_utils import (calc_dxdt, run_photochem_onestep_andplot, plot_atmosphere_file, init_photochem_profiles,
+                             init_main_nc, write_step_nc, merge_ncs, calc_cv_list, calc_cv, check_and_rebin_startfile)
+from photochem_utils import (calc_dxdt, run_photochem_onestep_andplot, init_photochem_profiles,
                             update_p_dens, update_atm_x, interp_pl_to_atm_grid, calc_zlevels_from_file)
 from crane_yaml_loader import initialize_from_config
 
@@ -81,17 +81,21 @@ if __name__ == "__main__":
     water_condensate_properties = load_particle_info("H2Oaer", photochem_rxn_file)
     if params['gen_new_init_atm']:
         z_levels_km = init_photochem_profiles(photo_init_filename, photo_settings_yaml_filename, params['lower_init_lapserate'], params['upper_init_lapserate'], params['Tsurf_init'], params['Tmin_upper'], options, params['keys_to_init'], water_condensate_properties, params['aero_new_radius'], params['kzz'], params['default_aero_radius'], params['H2mr'], photochem_rxn_file)
+        shutil.copy(photo_init_filename, photo_intermediate_filename)
     else:
         photo_init_filename = params['pchem_start_file']
-        z_levels_km = calc_zlevels_from_file(params['pchem_start_file'])
-    shutil.copy(photo_init_filename, photo_intermediate_filename)
+        shutil.copy(photo_init_filename, photo_intermediate_filename)
+        check_and_rebin_startfile(photo_intermediate_filename, photo_settings_yaml_filename)
+        z_levels_km = calc_zlevels_from_file(photo_init_filename)
 
     #then we do some stuff to load in the files and initialize the RT and photochem models
     temp, pres, xfrac, atm, x_atm_all, species_ids = init_from_file(photo_intermediate_filename, options, z_levels_km, condensate_harp_key, params['pchem_species_dict'], params['harp_species_dict'])
         #the below function can be modified to initialize the dT/dt and dx/dt rates, which can be used, if we want to move in the direction of calling the photochem every N timesteps instead of every 1
-    rad, bc = init_rates(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, params['pchem_species_dict'], params['harp_species_dict'], params['dt_dyn_init'], shared, params['do_plot'], photo_settings_yaml_filename, params['species_opacity_files_list'], condensate_harp_key, params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, rundir, species_ids, params["cia_opacity_files_list"], params["gen_new_cia_cktables"])
-    #rad, bc = config_amars_rt_init(atm, options, params['species_opacity_files_list'], params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, rundir, species_ids, params["cia_opacity_files_list"], params["gen_new_cia_cktables"])
+    #rad, bc, species_mol_weights = init_rates(x_atm_all, photo_binary_filename, photo_intermediate_filename, atm, options, params['pchem_species_dict'], params['harp_species_dict'], params['dt_dyn_init'], shared, params['do_plot'], photo_settings_yaml_filename, params['species_opacity_files_list'], condensate_harp_key, params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, photochem_rxn_file, cond_pchem_name, rundir, species_ids, params["cia_opacity_files_list"], params["gen_new_cia_cktables"])
+    rad, bc, species_mol_weights = config_amars_rt_init(atm, options, params['species_opacity_files_list'], params['aero_new_radius'], params['CIA_tempgrid'], rt_settings_yaml_filename, rundir, species_ids, params["cia_opacity_files_list"], params["gen_new_cia_cktables"])
     atm, atm_dens, photo_dens, photo_p = update_p_dens(photo_intermediate_filename, photo_settings_yaml_filename, atm, x_atm_all, photochem_rxn_file)
+    
+    cp_model_list = calc_cv_list(params['pchem_species_dict'], photochem_rxn_file, species_mol_weights, params["bulk_condensate_key"])
 
     step = 0
     switch_index = 0
@@ -110,6 +114,9 @@ if __name__ == "__main__":
         #call photochem, update mixing ratios (setting initial condensate mixing ratio before convective adjustment)
         #then do convective adjustment, and calc precip due to cooling
         netflux, downward_flux, upward_flux = calc_amars_rt(rad, atm, bc, options, condensate_harp_key, params['harp_species_dict'])
+
+        options.cv, options.mean_mol_weight = calc_cv(cp_model_list, atm, species_mol_weights, params['harp_species_dict'], params["bulk_condensate_key"])
+
         dTdt_atm, dTdt_surf = calc_dTdt(
             netflux=netflux,
             downward_flux=downward_flux,
